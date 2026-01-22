@@ -525,6 +525,31 @@ def run_host(port: int, renju_rules: bool = True):
                                 render(status)
                             print("> ", end="", flush=True)
                             print(input_buffer, end="", flush=True)
+                        elif cmd == "SWAP":
+                            if not game_started:
+                                my_color, opp_color = opp_color, my_color
+                                turn = my_color
+                                remote.ls.send_line(fmt("MATCH", color=opp_color, size=str(SIZE), win=str(WIN)))
+                                remote.ls.send_line(fmt("TURN", color=turn))
+                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
+                                with render_lock:
+                                    render(status)
+                                print("> ", end="", flush=True)
+                                print(input_buffer, end="", flush=True)
+                        elif cmd == "RESTART_REQUEST":
+                            pending_request = "restart"
+                            status = f"[REQUEST] {opp_name} wants to RESTART. Type 'y' to accept or 'n' to decline: "
+                            with render_lock:
+                                render(status)
+                            print("> ", end="", flush=True)
+                            print(input_buffer, end="", flush=True)
+                        elif cmd == "UNDO_REQUEST":
+                            pending_request = "undo"
+                            status = f"[REQUEST] {opp_name} wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
+                            with render_lock:
+                                render(status)
+                            print("> ", end="", flush=True)
+                            print(input_buffer, end="", flush=True)
                     except queue.Empty:
                         pass
                     time.sleep(0.1)
@@ -979,8 +1004,6 @@ def run_join(host: str, port: int, name: str):
                                 status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
                                 with render_lock:
                                     render()
-                                print("> ", end="", flush=True)
-                                print(input_buffer, end="", flush=True)
                             print("> ", end="", flush=True)
                             print(input_buffer, end="", flush=True)
                         elif cmd == "TURN":
@@ -1029,6 +1052,20 @@ def run_join(host: str, port: int, name: str):
                                 board[y-1][x-1] = color
                         elif cmd == "CHAT":
                             status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
+                            with render_lock:
+                                render()
+                            print("> ", end="", flush=True)
+                            print(input_buffer, end="", flush=True)
+                        elif cmd == "RESTART_REQUEST":
+                            pending_request = "restart"
+                            status = f"[REQUEST] Host wants to RESTART. Type 'y' to accept or 'n' to decline: "
+                            with render_lock:
+                                render()
+                            print("> ", end="", flush=True)
+                            print(input_buffer, end="", flush=True)
+                        elif cmd == "UNDO_REQUEST":
+                            pending_request = "undo"
+                            status = f"[REQUEST] Host wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
                             with render_lock:
                                 render()
                             print("> ", end="", flush=True)
@@ -1111,6 +1148,23 @@ def run_join(host: str, port: int, name: str):
                                 board[y-1][x-1] = color
                         elif cmd == "CHAT":
                             status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
+                            with render_lock:
+                                render()
+                        elif cmd == "SWAP":
+                            if my_color:
+                                my_color = "O" if my_color == "X" else "X"
+                                turn = my_color
+                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
+                                with render_lock:
+                                    render()
+                        elif cmd == "RESTART_REQUEST":
+                            pending_request = "restart"
+                            status = f"[REQUEST] Host wants to RESTART. Type 'y' to accept or 'n' to decline: "
+                            with render_lock:
+                                render()
+                        elif cmd == "UNDO_REQUEST":
+                            pending_request = "undo"
+                            status = f"[REQUEST] Host wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
                             with render_lock:
                                 render()
                     except queue.Empty:
