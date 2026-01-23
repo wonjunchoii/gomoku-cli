@@ -297,9 +297,6 @@ class GameState:
             new_color = "X" if color == "O" else "O"
             new_history.append((x, y, new_color))
         self.move_history = new_history
-        
-        # Swap turn
-        self.turn = "X" if self.turn == "O" else "O"
 
 # ---------------- Input Handler ----------------
 
@@ -500,12 +497,13 @@ class GomokuSession(ABC):
         return True
     
     def _handle_swap_response(self, response: str):
-        """Handle response to a swap request"""
+        """Handle response to a swap request (base implementation)"""
         self.send_message(fmt("SWAP_RESPONSE", response=response))
         if response == "y":
             self.my_color, self.opp_color = self.opp_color, self.my_color
             self.state.swap_colors()  # Swap all stones on board
-            self.state.turn = self.opp_color  # Turn goes to requester
+            # O is always first player, so turn goes to O
+            self.state.turn = "O"
             self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
         else:
             self.status = "[SWAP] You declined swap request."
@@ -602,7 +600,8 @@ class GomokuSession(ABC):
         if response == "y":
             self.my_color, self.opp_color = self.opp_color, self.my_color
             self.state.swap_colors()  # Swap all stones on board
-            self.state.turn = self.my_color  # Turn goes to requester (me)
+            # O is always first player, so turn goes to O
+            self.state.turn = "O"
             self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
         else:
             self.status = f"[SWAP] {self.opp_name} declined swap request."
@@ -935,13 +934,29 @@ class HostSession(GomokuSession):
             self.render(self.status)
         return True
     
+    def _handle_swap_response(self, response: str):
+        """Handle response to a swap request (HostSession override)"""
+        self.send_message(fmt("SWAP_RESPONSE", response=response))
+        if response == "y":
+            self.my_color, self.opp_color = self.opp_color, self.my_color
+            self.state.swap_colors()  # Swap all stones on board
+            # O is always first player, so turn goes to O
+            self.state.turn = "O"
+            # Send updated match info and turn to guest
+            self.ls.send_line(fmt("MATCH", color=self.opp_color, size=str(SIZE), win=str(WIN)))
+            self.ls.send_line(fmt("TURN", color=self.state.turn))
+            self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
+        else:
+            self.status = "[SWAP] You declined swap request."
+    
     def _process_swap_response_received(self, kv: dict) -> bool:
         """Process SWAP_RESPONSE from client (when we requested)"""
         response = kv.get("response", "n").lower()
         if response == "y":
             self.my_color, self.opp_color = self.opp_color, self.my_color
             self.state.swap_colors()  # Swap all stones on board
-            self.state.turn = self.my_color  # Turn goes to requester (me)
+            # O is always first player, so turn goes to O
+            self.state.turn = "O"
             self.ls.send_line(fmt("MATCH", color=self.opp_color, size=str(SIZE), win=str(WIN)))
             self.ls.send_line(fmt("TURN", color=self.state.turn))
             self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
@@ -1137,9 +1152,6 @@ class GuestSession(GomokuSession):
                 self.render(self.status)
         elif cmd == "BOARD":
             self.state.clear_board()
-            self.status = "[STATE] Board snapshot..."
-            with self.render_lock:
-                self.render(self.status)
         elif cmd == "STONE":
             x = int(kv.get("x", "0"))
             y = int(kv.get("y", "0"))
@@ -1168,8 +1180,8 @@ class GuestSession(GomokuSession):
                 self.my_color = "O" if self.my_color == "X" else "X"
                 self.opp_color = "X" if self.my_color == "O" else "O"
                 self.state.swap_colors()  # Swap all stones on board
-                self.state.turn = self.my_color  # Turn goes to requester (me)
-                self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
+                # Turn will be set by TURN message from host
+                self.status = f"[SWAP] Colors swapped. You are now {self.my_color}."
             else:
                 self.status = f"[SWAP] {self.opp_name} declined swap request."
             with self.render_lock:
