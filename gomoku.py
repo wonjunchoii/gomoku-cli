@@ -382,6 +382,7 @@ class GomokuSession(ABC):
         self.my_name = ""
         self.opp_name = ""
         self.ls: Optional[LineSocket] = None
+        self.should_quit = False
     
     @abstractmethod
     def setup_connection(self) -> bool:
@@ -478,6 +479,8 @@ class GomokuSession(ABC):
             self._handle_restart_response(response)
         elif self.pending_request == "undo":
             self._handle_undo_response(response)
+        elif self.pending_request == "quit":
+            self._handle_quit_response(response)
         
         self.pending_request = None
         self.pending_undo_color = None
@@ -519,10 +522,25 @@ class GomokuSession(ABC):
         else:
             self.status = "[UNDO] You declined undo request."
     
+    def _handle_quit_response(self, response: str):
+        """Handle response to a quit request"""
+        if response == "y":
+            # Send message to opponent
+            quit_message = "Opponent has left. Please use Ctrl+C or /quit to exit."
+            self.send_message(fmt("SAY", text=quit_message))
+            self.should_quit = True
+            self.status = "[QUIT] Exiting game."
+        else:
+            self.status = "[QUIT] Cancelled."
+    
     def handle_command(self, cmd: str) -> bool:
         """Handle a command. Returns True if should continue, False to quit."""
         if cmd == "/quit":
-            return False
+            self.pending_request = "quit"
+            self.status = "Are you sure you want to quit? (y/n): "
+            with self.render_lock:
+                self.render(self.status)
+            return True
         
         if cmd == "/help":
             help_cmds = "/swap /restart /undo /quit /help"
@@ -713,6 +731,8 @@ class GomokuSession(ABC):
             
             # Handle pending request
             if self.handle_pending_request(s):
+                if self.should_quit:
+                    break
                 continue
             
             # Parse input
@@ -1097,6 +1117,10 @@ class GuestSession(GomokuSession):
             color = kv.get("color", ".")
             if in_bounds(x, y):
                 self.state.board[y-1][x-1] = color
+        elif cmd == "SAY":
+            self.status = f"[CHAT] {self.opp_name}: {kv.get('text','')}"
+            with self.render_lock:
+                self.render(self.status)
         elif cmd == "CHAT":
             self.status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
             with self.render_lock:
