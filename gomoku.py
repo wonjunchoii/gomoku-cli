@@ -17,13 +17,13 @@ import sys
 import threading
 import select
 import time
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Callable
 
 # Windows non-blocking input
 if os.name == "nt":
     import msvcrt
-else:
-    import select
 
 SIZE = 15
 WIN = 5
@@ -52,38 +52,34 @@ def fmt(cmd: str, **kv):
 
 # ---------------- Game logic ----------------
 
-def in_bounds(x, y):
+def in_bounds(x: int, y: int) -> bool:
     return 1 <= x <= SIZE and 1 <= y <= SIZE
 
-def check_win(board, x, y, stone, renju_rules=False):
-    # board indexed [y-1][x-1]
+def check_win(board: List[List[str]], x: int, y: int, stone: str, renju_rules: bool = False) -> bool:
     dirs = [(1,0),(0,1),(1,1),(1,-1)]
     for dx, dy in dirs:
         count = 1
-        # forward
         nx, ny = x + dx, y + dy
         while in_bounds(nx, ny) and board[ny-1][nx-1] == stone:
             count += 1
             nx += dx
             ny += dy
-        # backward
         nx, ny = x - dx, y - dy
         while in_bounds(nx, ny) and board[ny-1][nx-1] == stone:
             count += 1
             nx -= dx
             ny -= dy
         if renju_rules:
-            if count == WIN:  # Exactly 5
+            if count == WIN:
                 return True
         else:
             if count >= WIN:
                 return True
     return False
 
-def count_line(board, x, y, stone, dx, dy):
+def count_line(board: List[List[str]], x: int, y: int, stone: str, dx: int, dy: int) -> Tuple[int, bool]:
     """Count consecutive stones in one direction"""
     count = 1
-    # Forward
     nx, ny = x + dx, y + dy
     while in_bounds(nx, ny) and board[ny-1][nx-1] == stone:
         count += 1
@@ -91,7 +87,6 @@ def count_line(board, x, y, stone, dx, dy):
         ny += dy
     forward_end_x, forward_end_y = nx, ny
     
-    # Backward
     nx, ny = x - dx, y - dy
     while in_bounds(nx, ny) and board[ny-1][nx-1] == stone:
         count += 1
@@ -99,19 +94,17 @@ def count_line(board, x, y, stone, dx, dy):
         ny -= dy
     backward_end_x, backward_end_y = nx, ny
     
-    # Check if line is open (both ends are empty)
     forward_open = in_bounds(forward_end_x, forward_end_y) and board[forward_end_y-1][forward_end_x-1] == "."
     backward_open = in_bounds(backward_end_x, backward_end_y) and board[backward_end_y-1][backward_end_x-1] == "."
     is_open = forward_open and backward_open
     
     return count, is_open
 
-def check_forbidden_move(board, x, y, stone, renju_rules):
+def check_forbidden_move(board: List[List[str]], x: int, y: int, stone: str, renju_rules: bool) -> Tuple[bool, Optional[str]]:
     """Check if move violates renju rules (6+, 33, 44)"""
     if not renju_rules:
         return True, None
     
-    # Temporarily place stone
     board[y-1][x-1] = stone
     
     dirs = [(1,0),(0,1),(1,1),(1,-1)]
@@ -129,7 +122,6 @@ def check_forbidden_move(board, x, y, stone, renju_rules):
         elif count == 4 and is_open:
             open_fours += 1
     
-    # Remove temporary stone
     board[y-1][x-1] = "."
     
     if has_six_or_more:
@@ -142,11 +134,9 @@ def check_forbidden_move(board, x, y, stone, renju_rules):
     return True, None
 
 def clear_screen():
-    # CMD-friendly
     os.system("cls" if os.name == "nt" else "clear")
 
-def board_to_text(board):
-    # header - x-axis as letters A-O
+def board_to_text(board: List[List[str]]) -> str:
     header_letters = "".join([chr(ord('A') + i).rjust(2) for i in range(SIZE)])
     out = []
     out.append("    " + header_letters)
@@ -164,19 +154,16 @@ def board_to_text(board):
     out.append("")
     return "\n".join(out)
 
-
 def parse_move_input(s: str):
     s = s.strip()
     if not s:
         return None
     if s.startswith("/"):
-        return s.lower()  # command
-    # format: "x y"
+        return s.lower()
     parts = s.split()
     if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
         x, y = int(parts[0]), int(parts[1])
         return (x, y)
-    # format: H8
     if len(s) >= 2 and s[0].isalpha():
         col = s[0].upper()
         if "A" <= col <= "O":
@@ -201,7 +188,7 @@ class LineSocket:
         with self.lock:
             self.sock.sendall(data)
 
-    def recv_line(self):
+    def recv_line(self) -> Optional[str]:
         while b"\n" not in self.buf:
             chunk = self.sock.recv(4096)
             if not chunk:
@@ -210,1360 +197,1016 @@ class LineSocket:
         line, self.buf = self.buf.split(b"\n", 1)
         return line.decode("utf-8", errors="replace")
 
-# ---------------- Server (host) ----------------
+# ---------------- Game State ----------------
 
 @dataclass
-class ClientConn:
-    ls: LineSocket
-    name: str = "Player"
-
-def run_host(port: int, renju_rules: bool = True):
-    board = [["." for _ in range(SIZE)] for _ in range(SIZE)]
-    turn = "O"  # O starts (first player)
-    move_no = 0
-    game_over = False
-    move_history = []  # List of (x, y, color) for undo
-    game_started = False  # Track if game has started
-
-    # connections: host acts as player O locally; remote is X
-    remote = None
-
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", port))
-    srv.listen(1)
-
-    print(f"[HOST] Listening on 0.0.0.0:{port} ...")
-    print("[HOST] Waiting for one opponent to join...")
-    conn, addr = srv.accept()
-    conn.settimeout(None)
-    remote = ClientConn(LineSocket(conn))
-    print(f"[HOST] Opponent connected from {addr[0]}:{addr[1]}")
-
-    # handshake: receive HELLO
-    line = remote.ls.recv_line()
-    if line is None:
-        print("[HOST] Connection closed during HELLO.")
-        return
-    cmd, kv = parse_line(line)
-    if cmd != "HELLO":
-        remote.ls.send_line(fmt("ERR", code="BAD_HELLO", msg="expected HELLO"))
-        print("[HOST] Bad HELLO, closing.")
-        return
-    remote.name = kv.get("name", "Player")
-
-    # send WELCOME + MATCH + initial TURN
-    remote.ls.send_line(fmt("WELCOME", v="1", id="remote", role="GUEST"))
-    remote.ls.send_line(fmt("MATCH", color="X", size=str(SIZE), win=str(WIN)))
-    remote.ls.send_line(fmt("TURN", color=turn))
-
-    # host local player details (O = first player, X = second player)
-    my_color = "O"
-    opp_color = "X"
-    my_name = "Host"
-    opp_name = remote.name
-
-    # Receiver thread for remote messages -> queue
-    q_in = queue.Queue()
-
-    def recv_loop():
-        while True:
-            try:
-                l = remote.ls.recv_line()
-            except Exception:
-                l = None
-            q_in.put(l)
-            if l is None:
-                break
-
-    t = threading.Thread(target=recv_loop, daemon=True)
-    t.start()
-
-    def broadcast_state():
-        # send BOARD header then all stones then TURN
-        remote.ls.send_line(fmt("BOARD", size=str(SIZE)))
-        for y in range(1, SIZE+1):
-            for x in range(1, SIZE+1):
-                c = board[y-1][x-1]
-                if c in ("O", "X"):
-                    remote.ls.send_line(fmt("STONE", x=str(x), y=str(y), color=c))
-        remote.ls.send_line(fmt("TURN", color=turn))
-
-    def apply_move(x, y, color):
-        nonlocal move_no, turn, game_over, move_history, game_started
-        # renju_rules is accessible via closure
-        if game_over:
+class GameState:
+    """Manages the game board and state"""
+    board: List[List[str]] = field(default_factory=lambda: [["." for _ in range(SIZE)] for _ in range(SIZE)])
+    turn: str = "O"
+    move_no: int = 0
+    game_over: bool = False
+    move_history: List[Tuple[int, int, str]] = field(default_factory=list)
+    game_started: bool = False
+    renju_rules: bool = True
+    
+    def reset(self):
+        """Reset the game to initial state"""
+        self.board = [["." for _ in range(SIZE)] for _ in range(SIZE)]
+        self.turn = "O"
+        self.move_no = 0
+        self.game_over = False
+        self.game_started = False
+        self.move_history = []
+    
+    def apply_move(self, x: int, y: int, color: str) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """Apply a move to the board. Returns (success, error_tuple_or_None)"""
+        if self.game_over:
             return False, ("GAME_OVER", "game already finished")
-        if color != turn:
+        if color != self.turn:
             return False, ("NOT_YOUR_TURN", "wait")
         if not in_bounds(x, y):
             return False, ("OUT_OF_RANGE", "x/y must be 1..15")
-        if board[y-1][x-1] != ".":
+        if self.board[y-1][x-1] != ".":
             return False, ("OCCUPIED", "already occupied")
         
         # Check renju rules (only for first player O)
-        if renju_rules and color == "O":
-            ok, msg = check_forbidden_move(board, x, y, color, renju_rules)
+        if self.renju_rules and color == "O":
+            ok, msg = check_forbidden_move(self.board, x, y, color, self.renju_rules)
             if not ok:
                 return False, ("FORBIDDEN_MOVE", msg)
         
-        board[y-1][x-1] = color
-        move_no += 1
-        game_started = True  # Game has started after first move
-        move_history.append((x, y, color))  # Save move for undo
-        # broadcast OK
-        remote.ls.send_line(fmt("OK", move=str(move_no), x=str(x), y=str(y), color=color))
-        # check win
-        if check_win(board, x, y, color, renju_rules):
-            game_over = True
-            remote.ls.send_line(fmt("WIN", color=color, x=str(x), y=str(y)))
+        self.board[y-1][x-1] = color
+        self.move_no += 1
+        self.game_started = True
+        self.move_history.append((x, y, color))
+        
+        # Check win
+        if check_win(self.board, x, y, color, self.renju_rules):
+            self.game_over = True
             return True, None
-        # next turn
-        turn = "X" if turn == "O" else "O"
-        remote.ls.send_line(fmt("TURN", color=turn))
+        
+        # Next turn
+        self.turn = "X" if self.turn == "O" else "O"
         return True, None
     
-    def reset_game():
-        nonlocal board, turn, move_no, game_over, move_history, game_started
-        board = [["." for _ in range(SIZE)] for _ in range(SIZE)]
-        turn = "O"
-        move_no = 0
-        game_over = False
-        game_started = False
-        move_history = []
-        broadcast_state()
-    
-    def undo_last_move(requesting_color):
-        nonlocal board, turn, move_no, game_over, move_history, game_started
-        if not move_history:
+    def undo_last_move(self, requesting_color: str) -> Tuple[bool, Optional[str]]:
+        """Undo the last move. Returns (success, error_message_or_None)"""
+        if not self.move_history:
             return False, "No moves to undo"
-        # Check if last move belongs to the requester
-        last_x, last_y, last_color = move_history[-1]
+        
+        last_x, last_y, last_color = self.move_history[-1]
         if last_color != requesting_color:
             return False, "Can only undo your own last move"
-        # Remove only the last move (1 move)
-        x, y, color = move_history.pop()
-        board[y-1][x-1] = "."
-        move_no -= 1
-        # Turn goes back to the requester
-        turn = requesting_color
-        game_over = False  # Reset win state
-        broadcast_state()
+        
+        x, y, color = self.move_history.pop()
+        self.board[y-1][x-1] = "."
+        self.move_no -= 1
+        self.turn = requesting_color
+        self.game_over = False
         return True, None
+    
+    def apply_ok(self, x: int, y: int, color: str):
+        """Apply a confirmed move (for client side)"""
+        if in_bounds(x, y):
+            self.board[y-1][x-1] = color
+            self.move_history.append((x, y, color))
+        self.move_no += 1
+        if self.move_no > 0:
+            self.game_started = True
+    
+    def clear_board(self):
+        """Clear the board (for receiving BOARD command)"""
+        for y in range(SIZE):
+            for x in range(SIZE):
+                self.board[y][x] = "."
+        self.move_history = []
 
-    def render(status_line=""):
-        nonlocal show_commands
+# ---------------- Input Handler ----------------
+
+class InputHandler:
+    """Handles platform-specific non-blocking input"""
+    
+    def __init__(self, message_queue: queue.Queue, on_message: Callable):
+        self.q_in = message_queue
+        self.on_message = on_message
+        self.input_buffer = ""
+    
+    def get_input(self) -> Optional[str]:
+        """Get user input, handling messages while waiting"""
+        if os.name == "nt":
+            return self._get_input_windows()
+        else:
+            return self._get_input_unix()
+    
+    def _get_input_windows(self) -> Optional[str]:
+        """Windows non-blocking input with msvcrt"""
+        print("> ", end="", flush=True)
+        self.input_buffer = ""
+        
+        while True:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch == b'\r':  # Enter
+                    print()
+                    return self.input_buffer.strip()
+                elif ch == b'\x08':  # Backspace
+                    if self.input_buffer:
+                        self.input_buffer = self.input_buffer[:-1]
+                        print('\b \b', end='', flush=True)
+                elif ch == b'\x03':  # Ctrl+C
+                    return "/quit"
+                else:
+                    try:
+                        char = ch.decode('utf-8')
+                        if char.isprintable():
+                            self.input_buffer += char
+                            print(char, end='', flush=True)
+                    except:
+                        pass
+            else:
+                # Check for messages
+                result = self._check_messages_windows()
+                if result == "disconnect":
+                    return None
+                time.sleep(0.1)
+    
+    def _check_messages_windows(self) -> Optional[str]:
+        """Check for incoming messages while waiting for input (Windows)"""
+        try:
+            l = self.q_in.get_nowait()
+            if l is None:
+                return "disconnect"
+            
+            needs_reprompt = self.on_message(l)
+            if needs_reprompt:
+                print("> ", end="", flush=True)
+                print(self.input_buffer, end="", flush=True)
+            return None
+        except queue.Empty:
+            return None
+    
+    def _get_input_unix(self) -> Optional[str]:
+        """Unix/Linux non-blocking input with select"""
+        while True:
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                try:
+                    return input("> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return "/quit"
+            else:
+                # Check for messages
+                try:
+                    l = self.q_in.get_nowait()
+                    if l is None:
+                        return None
+                    self.on_message(l)
+                except queue.Empty:
+                    pass
+
+# ---------------- Base Session ----------------
+
+class GomokuSession(ABC):
+    """Abstract base class for Gomoku game sessions"""
+    
+    def __init__(self):
+        self.state = GameState()
+        self.q_in: queue.Queue = queue.Queue()
+        self.render_lock = threading.Lock()
+        self.status = ""
+        self.show_commands = True
+        self.pending_request: Optional[str] = None
+        self.pending_undo_color: Optional[str] = None
+        self.my_color: Optional[str] = None
+        self.opp_color: Optional[str] = None
+        self.my_name = ""
+        self.opp_name = ""
+        self.ls: Optional[LineSocket] = None
+    
+    @abstractmethod
+    def setup_connection(self) -> bool:
+        """Setup the network connection. Returns True on success."""
+        pass
+    
+    @abstractmethod
+    def send_message(self, msg: str):
+        """Send a message to the remote peer"""
+        pass
+    
+    @abstractmethod
+    def broadcast_state(self):
+        """Broadcast the current game state"""
+        pass
+    
+    @abstractmethod
+    def handle_move(self, x: int, y: int, color: str) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """Handle a move attempt"""
+        pass
+    
+    @abstractmethod
+    def cleanup(self):
+        """Cleanup resources on exit"""
+        pass
+    
+    def start_receiver_thread(self):
+        """Start the message receiver thread"""
+        def recv_loop():
+            while True:
+                try:
+                    l = self.ls.recv_line()
+                except Exception:
+                    l = None
+                self.q_in.put(l)
+                if l is None:
+                    break
+        
+        t = threading.Thread(target=recv_loop, daemon=True)
+        t.start()
+    
+    def render(self, status_line: str = ""):
+        """Render the game board and status"""
         clear_screen()
-        print(board_to_text(board))
+        print(board_to_text(self.state.board))
         if status_line:
             print(status_line)
+        
         # Turn indicator
-        if not game_over:
-            if turn == my_color:
-                turn_indicator = ">>> YOUR TURN <<<"
-            else:
-                turn_indicator = ">>> OPP TURN <<<"
-        else:
-            turn_indicator = "GAME OVER"
-        print(f"{turn_indicator}   You: O   Opponent: X ({opp_name})")
-        if game_over:
-            print("GAME OVER. /restart or /quit")
-        # Show commands list only on first render
-        if show_commands:
-            help_cmds = "/swap /restart /undo /quit /help"
-            if game_started:
-                help_cmds = "/restart /undo /quit /help"
-            print(f"\nCommands: {help_cmds}")
-            print("Input: 'x y' (e.g. 8 8) or 'H8' (A-O + 1-15)")
-
-    status = ""
-    show_commands = True  # Show commands list on first render
-    render()
-    show_commands = False  # Don't show commands list after first render
-    
-    # Render lock for thread safety
-    render_lock = threading.Lock()
-    pending_request = None  # "restart" or "undo" when waiting for y/n response
-
-    while True:
-        # handle inbound remote messages (non-blocking)
-        try:
-            while True:
-                l = q_in.get_nowait()
-                if l is None:
-                    status = "[DISCONNECTED] Opponent left."
-                    game_over = True
-                    with render_lock:
-                        render(status)
-                    break
-                cmd, kv = parse_line(l)
-                if cmd == "MOVE":
-                    try:
-                        x = int(kv.get("x", "0"))
-                        y = int(kv.get("y", "0"))
-                    except ValueError:
-                        remote.ls.send_line(fmt("ERR", code="BAD_MOVE", msg="invalid x/y"))
-                        continue
-                    ok, err = apply_move(x, y, opp_color)
-                    if not ok:
-                        code, msg = err
-                        remote.ls.send_line(fmt("ERR", code=code, msg=msg))
-                    status = f"[OPP MOVE] {x},{y}"
-                    with render_lock:
-                        render(status)
-                elif cmd == "SAY":
-                    # optional chat
-                    status = f"[CHAT] {opp_name}: {kv.get('text','')}"
-                    with render_lock:
-                        render(status)
-                elif cmd == "SWAP_REQUEST":
-                    if game_started:
-                        remote.ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
-                        continue
-                    pending_request = "swap"
-                    status = f"[REQUEST] {opp_name} wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
-                    with render_lock:
-                        render(status)
-                elif cmd == "SWAP_RESPONSE":
-                    response = kv.get("response", "n").lower()
-                    if response == "y":
-                        # Swap colors and turn (requesting player's side)
-                        my_color, opp_color = opp_color, my_color
-                        turn = my_color  # Turn goes to the player who requested swap
-                        remote.ls.send_line(fmt("MATCH", color=opp_color, size=str(SIZE), win=str(WIN)))
-                        remote.ls.send_line(fmt("TURN", color=turn))
-                        status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                    else:
-                        status = f"[SWAP] {opp_name} declined swap request."
-                    with render_lock:
-                        render(status)
-                elif cmd == "RESTART_REQUEST":
-                    pending_request = "restart"
-                    status = f"[REQUEST] {opp_name} wants to RESTART. Type 'y' to accept or 'n' to decline: "
-                    with render_lock:
-                        render(status)
-                elif cmd == "RESTART_RESPONSE":
-                    response = kv.get("response", "n").lower()
-                    if response == "y":
-                        reset_game()
-                        status = "[RESTART] Game restarted!"
-                    else:
-                        status = f"[RESTART] {opp_name} declined restart request."
-                    with render_lock:
-                        render(status)
-                elif cmd == "UNDO_REQUEST":
-                    requesting_color = kv.get("color", opp_color)
-                    # Verify that last move belongs to the requester
-                    if not move_history or move_history[-1][2] != requesting_color:
-                        remote.ls.send_line(fmt("ERR", code="INVALID_UNDO", msg="Last move is not yours"))
-                        continue
-                    pending_request = "undo"
-                    pending_undo_color = requesting_color
-                    status = f"[REQUEST] {opp_name} wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
-                    with render_lock:
-                        render(status)
-                elif cmd == "UNDO_RESPONSE":
-                    response = kv.get("response", "n").lower()
-                    if response == "y":
-                        requesting_color = kv.get("color", opp_color)
-                        ok, err = undo_last_move(requesting_color)
-                        if ok:
-                            status = "[UNDO] Last move undone!"
-                        else:
-                            status = f"[UNDO] Failed: {err}"
-                    else:
-                        status = f"[UNDO] {opp_name} declined undo request."
-                    with render_lock:
-                        render(status)
-                elif cmd == "HELLO":
-                    # ignore (already)
-                    pass
-                else:
-                    # unknown
-                    remote.ls.send_line(fmt("ERR", code="UNKNOWN_CMD", msg=f"unknown {cmd}"))
-        except queue.Empty:
-            pass
-
-        if game_over and status.startswith("[DISCONNECTED]"):
-            # still allow /quit
-            pass
-
-        # local input (non-blocking with periodic updates)
-        s = None
-        if os.name == "nt":  # Windows
-            print("> ", end="", flush=True)
-            input_buffer = ""
-            while True:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getch()
-                    if ch == b'\r':  # Enter
-                        print()  # newline
-                        s = input_buffer.strip()
-                        break
-                    elif ch == b'\x08':  # Backspace
-                        if input_buffer:
-                            input_buffer = input_buffer[:-1]
-                            print('\b \b', end='', flush=True)
-                    elif ch == b'\x03':  # Ctrl+C
-                        s = "/quit"
-                        break
-                    else:
-                        try:
-                            char = ch.decode('utf-8')
-                            if char.isprintable():
-                                input_buffer += char
-                                print(char, end='', flush=True)
-                        except:
-                            pass
-                else:
-                    # Check for messages and render updates
-                    try:
-                        l = q_in.get_nowait()
-                        if l is None:
-                            status = "[DISCONNECTED] Opponent left."
-                            game_over = True
-                            with render_lock:
-                                render(status)
-                            break
-                        cmd, kv = parse_line(l)
-                        if cmd == "MOVE":
-                            try:
-                                x = int(kv.get("x", "0"))
-                                y = int(kv.get("y", "0"))
-                            except ValueError:
-                                remote.ls.send_line(fmt("ERR", code="BAD_MOVE", msg="invalid x/y"))
-                                continue
-                            ok, err = apply_move(x, y, opp_color)
-                            if not ok:
-                                code, msg = err
-                                remote.ls.send_line(fmt("ERR", code=code, msg=msg))
-                            status = f"[OPP MOVE] {x},{y}"
-                            with render_lock:
-                                render(status)
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "SAY":
-                            status = f"[CHAT] {opp_name}: {kv.get('text','')}"
-                            with render_lock:
-                                render(status)
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "SWAP_REQUEST":
-                            if game_started:
-                                remote.ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
-                                print("> ", end="", flush=True)
-                                print(input_buffer, end="", flush=True)
-                                continue
-                            pending_request = "swap"
-                            status = f"[REQUEST] {opp_name} wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render(status)
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "SWAP_RESPONSE":
-                            response = kv.get("response", "n").lower()
-                            if response == "y":
-                                # Swap colors and turn
-                                my_color, opp_color = opp_color, my_color
-                                turn = my_color  # Turn goes to the player who requested swap
-                                remote.ls.send_line(fmt("MATCH", color=opp_color, size=str(SIZE), win=str(WIN)))
-                                remote.ls.send_line(fmt("TURN", color=turn))
-                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                            else:
-                                status = f"[SWAP] {opp_name} declined swap request."
-                            with render_lock:
-                                render(status)
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "RESTART_REQUEST":
-                            pending_request = "restart"
-                            status = f"[REQUEST] {opp_name} wants to RESTART. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render(status)
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "UNDO_REQUEST":
-                            requesting_color = kv.get("color", opp_color)
-                            if not move_history or move_history[-1][2] != requesting_color:
-                                remote.ls.send_line(fmt("ERR", code="INVALID_UNDO", msg="Last move is not yours"))
-                                print("> ", end="", flush=True)
-                                print(input_buffer, end="", flush=True)
-                                continue
-                            pending_request = "undo"
-                            pending_undo_color = requesting_color
-                            status = f"[REQUEST] {opp_name} wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render(status)
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                    except queue.Empty:
-                        pass
-                    time.sleep(0.1)
-        else:  # Unix/Linux
-            try:
-                if select.select([sys.stdin], [], [], 1.5)[0]:
-                    s = input("> ").strip()
-                else:
-                    # Timeout - check for messages and continue
-                    continue
-            except (EOFError, KeyboardInterrupt):
-                s = "/quit"
-
-        if s is None:
-            # No input available, continue to check messages
-            continue
-
-        # Check for pending request (y/n response)
-        if pending_request:
-            s_lower = s.strip().lower()
-            if s_lower in ("y", "yes", "n", "no"):
-                response = "y" if s_lower in ("y", "yes") else "n"
-                if pending_request == "swap":
-                    remote.ls.send_line(fmt("SWAP_RESPONSE", response=response))
-                    if response == "y":
-                        # Swap colors and turn
-                        my_color, opp_color = opp_color, my_color
-                        turn = opp_color  # Turn goes to the player who requested swap (opponent)
-                        status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                    else:
-                        status = f"[SWAP] You declined swap request."
-                elif pending_request == "restart":
-                    remote.ls.send_line(fmt("RESTART_RESPONSE", response=response))
-                    if response == "y":
-                        reset_game()
-                        status = "[RESTART] Game restarted!"
-                    else:
-                        status = f"[RESTART] You declined restart request."
-                elif pending_request == "undo":
-                    undo_color = pending_undo_color if pending_undo_color else opp_color
-                    remote.ls.send_line(fmt("UNDO_RESPONSE", response=response, color=undo_color))
-                    if response == "y":
-                        ok, err = undo_last_move(undo_color)
-                        if ok:
-                            status = "[UNDO] Last move undone!"
-                        else:
-                            status = f"[UNDO] Failed: {err}"
-                    else:
-                        status = f"[UNDO] You declined undo request."
-                pending_request = None
-                pending_undo_color = None
-                with render_lock:
-                    render(status)
-                continue
-            else:
-                status = "[ERR] Please type 'y' or 'n' to respond to the request."
-                with render_lock:
-                    render(status)
-                continue
-
-        parsed = parse_move_input(s)
-        if parsed == "/quit":
-            try:
-                remote.ls.send_line(fmt("SAY", text="(host left)"))
-            except Exception:
-                pass
-            break
-        if parsed == "/help":
-            help_cmds = "/swap /restart /undo /quit /help"
-            if game_started:
-                help_cmds = "/restart /undo /quit /help"
-            status = f"Input: 'x y' (e.g. 8 8) or 'H8' (A-O + 1-15).\nCommands: {help_cmds}"
-            with render_lock:
-                render(status)
-            continue
-        if parsed == "/swap":
-            if game_started:
-                status = "[ERR] /swap is only available before the game starts."
-                with render_lock:
-                    render(status)
-                continue
-            remote.ls.send_line(fmt("SWAP_REQUEST"))
-            status = "[SWAP] Request sent to opponent. Waiting for response..."
-            with render_lock:
-                render(status)
-            # Wait for response
-            response_received = False
-            while not response_received:
-                try:
-                    l = q_in.get(timeout=30)  # 30 second timeout
-                    if l is None:
-                        status = "[DISCONNECTED] Opponent left."
-                        game_over = True
-                        with render_lock:
-                            render(status)
-                        break
-                    cmd, kv = parse_line(l)
-                    if cmd == "SWAP_RESPONSE":
-                        response = kv.get("response", "n").lower()
-                        if response == "y":
-                            # Swap colors and turn
-                            my_color, opp_color = opp_color, my_color
-                            turn = my_color  # Turn goes to the player who requested swap (host)
-                            status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                        else:
-                            status = f"[SWAP] {opp_name} declined swap request."
-                        with render_lock:
-                            render(status)
-                        response_received = True
-                    else:
-                        # Handle other commands normally
-                        q_in.put(l)  # Put back for normal processing
-                        time.sleep(0.1)
-                except queue.Empty:
-                    status = "[SWAP] Request timeout. Opponent did not respond."
-                    with render_lock:
-                        render(status)
-                    response_received = True
-            continue
-        if parsed == "/restart":
-            remote.ls.send_line(fmt("RESTART_REQUEST"))
-            status = "[RESTART] Request sent to opponent. Waiting for response..."
-            with render_lock:
-                render(status)
-            # Wait for response
-            response_received = False
-            while not response_received:
-                try:
-                    l = q_in.get(timeout=30)  # 30 second timeout
-                    if l is None:
-                        status = "[DISCONNECTED] Opponent left."
-                        game_over = True
-                        with render_lock:
-                            render(status)
-                        break
-                    cmd, kv = parse_line(l)
-                    if cmd == "RESTART_RESPONSE":
-                        response = kv.get("response", "n").lower()
-                        if response == "y":
-                            reset_game()
-                            status = "[RESTART] Game restarted!"
-                        else:
-                            status = f"[RESTART] {opp_name} declined restart request."
-                        with render_lock:
-                            render(status)
-                        response_received = True
-                    else:
-                        # Handle other commands normally
-                        q_in.put(l)  # Put back for normal processing
-                        time.sleep(0.1)
-                except queue.Empty:
-                    status = "[RESTART] Request timeout. Opponent did not respond."
-                    with render_lock:
-                        render(status)
-                    response_received = True
-            continue
-        if parsed == "/undo":
-            if game_over:
-                status = "[ERR] Game is over. Cannot undo."
-                with render_lock:
-                    render(status)
-                continue
-            if not game_started or not move_history:
-                status = "[ERR] No moves to undo."
-                with render_lock:
-                    render(status)
-                continue
-            # Check if last move belongs to the requester
-            last_x, last_y, last_color = move_history[-1]
-            if last_color != my_color:
-                status = "[ERR] Can only undo your own last move."
-                with render_lock:
-                    render(status)
-                continue
-            remote.ls.send_line(fmt("UNDO_REQUEST", color=my_color))
-            status = "[UNDO] Request sent to opponent. Waiting for response..."
-            with render_lock:
-                render(status)
-            # Wait for response
-            response_received = False
-            while not response_received:
-                try:
-                    l = q_in.get(timeout=30)  # 30 second timeout
-                    if l is None:
-                        status = "[DISCONNECTED] Opponent left."
-                        game_over = True
-                        with render_lock:
-                            render(status)
-                        break
-                    cmd, kv = parse_line(l)
-                    if cmd == "UNDO_RESPONSE":
-                        response = kv.get("response", "n").lower()
-                        if response == "y":
-                            ok, err = undo_last_move(my_color)
-                            if ok:
-                                status = "[UNDO] Last move undone!"
-                            else:
-                                status = f"[UNDO] Failed: {err}"
-                        else:
-                            status = f"[UNDO] {opp_name} declined undo request."
-                        with render_lock:
-                            render(status)
-                        response_received = True
-                    else:
-                        # Handle other commands normally
-                        q_in.put(l)  # Put back for normal processing
-                        time.sleep(0.1)
-                except queue.Empty:
-                    status = "[UNDO] Request timeout. Opponent did not respond."
-                    with render_lock:
-                        render(status)
-                    response_received = True
-            continue
-        if parsed == "invalid":
-            status = "[ERR] Invalid input. Example: 8 8 or H8"
-            with render_lock:
-                render(status)
-            continue
-        if isinstance(parsed, tuple):
-            x, y = parsed
-            ok, err = apply_move(x, y, my_color)
-            if not ok:
-                code, msg = err
-                status = f"[ERR] {code}: {msg}"
-            else:
-                status = f"[YOU MOVE] {x},{y}"
-            with render_lock:
-                render(status)
-            continue
-
-    try:
-        conn.close()
-    except Exception:
-        pass
-    try:
-        srv.close()
-    except Exception:
-        pass
-    print("Bye.")
-
-# ---------------- Client (join) ----------------
-
-def run_join(host: str, port: int, name: str):
-    board = [["." for _ in range(SIZE)] for _ in range(SIZE)]
-    my_color = None
-    turn = None
-    game_over = False
-    move_no = 0
-    move_history = []  # List of (x, y, color) for undo
-    game_started = False  # Track if game has started
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((host, port))
-    ls = LineSocket(sock)
-
-    # HELLO
-    ls.send_line(fmt("HELLO", v="1", name=name))
-
-    q_in = queue.Queue()
-
-    def recv_loop():
-        while True:
-            try:
-                l = ls.recv_line()
-            except Exception:
-                l = None
-            q_in.put(l)
-            if l is None:
-                break
-
-    threading.Thread(target=recv_loop, daemon=True).start()
-
-    status = ""
-
-    def render():
-        clear_screen()
-        print(board_to_text(board))
-        if status:
-            print(status)
-        # Turn indicator
-        if my_color is None or turn is None:
+        if self.my_color is None or self.state.turn is None:
             turn_indicator = "Waiting..."
             you_stone = "?"
             opp_stone = "?"
         else:
-            you_stone = "O" if my_color == "O" else "X"
-            opp_stone = "X" if my_color == "O" else "O"
-            if not game_over:
-                if turn == my_color:
+            you_stone = self.my_color
+            opp_stone = self.opp_color
+            if not self.state.game_over:
+                if self.state.turn == self.my_color:
                     turn_indicator = ">>> YOUR TURN <<<"
                 else:
                     turn_indicator = ">>> OPP TURN <<<"
             else:
                 turn_indicator = "GAME OVER"
-        print(f"{turn_indicator}   You: {you_stone}   Opponent: {opp_stone}")
-        if game_over:
+        
+        print(f"{turn_indicator}   You: {you_stone}   Opponent: {opp_stone} ({self.opp_name})")
+        
+        if self.state.game_over:
             print("GAME OVER. /restart or /quit")
-
-    show_commands = True  # Show commands list on first render
-    render()
-    show_commands = False  # Don't show commands list after first render
+        
+        if self.show_commands:
+            help_cmds = "/swap /restart /undo /quit /help"
+            if self.state.game_started:
+                help_cmds = "/restart /undo /quit /help"
+            print(f"\nCommands: {help_cmds}")
+            print("Input: 'x y' (e.g. 8 8) or 'H8' (A-O + 1-15)")
     
-    # Render lock for thread safety
-    render_lock = threading.Lock()
-    pending_request = None  # "restart" or "undo" when waiting for y/n response
-    pending_undo_color = None  # Color of player requesting undo
-
-    def apply_ok(x, y, color):
-        nonlocal move_no, move_history, game_started
-        if in_bounds(x, y):
-            board[y-1][x-1] = color
-            move_history.append((x, y, color))  # Save move for undo
-        move_no += 1
-        if move_no > 0:
-            game_started = True
+    def handle_pending_request(self, s: str) -> bool:
+        """Handle pending y/n request. Returns True if handled."""
+        if not self.pending_request:
+            return False
+        
+        s_lower = s.strip().lower()
+        if s_lower not in ("y", "yes", "n", "no"):
+            self.status = "[ERR] Please type 'y' or 'n' to respond to the request."
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        response = "y" if s_lower in ("y", "yes") else "n"
+        
+        if self.pending_request == "swap":
+            self._handle_swap_response(response)
+        elif self.pending_request == "restart":
+            self._handle_restart_response(response)
+        elif self.pending_request == "undo":
+            self._handle_undo_response(response)
+        
+        self.pending_request = None
+        self.pending_undo_color = None
+        with self.render_lock:
+            self.render(self.status)
+        return True
     
-    def reset_game():
-        nonlocal board, turn, move_no, game_over, move_history, game_started
-        board = [["." for _ in range(SIZE)] for _ in range(SIZE)]
-        turn = "O"  # O starts
-        move_no = 0
-        game_over = False
-        game_started = False
-        move_history = []
+    def _handle_swap_response(self, response: str):
+        """Handle response to a swap request"""
+        self.send_message(fmt("SWAP_RESPONSE", response=response))
+        if response == "y":
+            self.my_color, self.opp_color = self.opp_color, self.my_color
+            self.state.turn = self.opp_color  # Turn goes to requester
+            self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
+        else:
+            self.status = "[SWAP] You declined swap request."
     
-    def undo_last_move(requesting_color):
-        nonlocal board, turn, move_no, game_over, move_history, game_started
-        if not move_history:
-            return False, "No moves to undo"
-        # Check if last move belongs to the requester
-        last_x, last_y, last_color = move_history[-1]
-        if last_color != requesting_color:
-            return False, "Can only undo your own last move"
-        # Remove only the last move (1 move)
-        x, y, color = move_history.pop()
-        board[y-1][x-1] = "."
-        move_no -= 1
-        # Turn goes back to the requester
-        turn = requesting_color
-        game_over = False  # Reset win state
-        ls.send_line(fmt("BOARD", size=str(SIZE)))
-        return True, None
-
-    while True:
-        # pump inbound
+    def _handle_restart_response(self, response: str):
+        """Handle response to a restart request"""
+        self.send_message(fmt("RESTART_RESPONSE", response=response))
+        if response == "y":
+            self.state.reset()
+            self.broadcast_state()
+            self.status = "[RESTART] Game restarted!"
+        else:
+            self.status = "[RESTART] You declined restart request."
+    
+    def _handle_undo_response(self, response: str):
+        """Handle response to an undo request"""
+        undo_color = self.pending_undo_color or self.opp_color
+        self.send_message(fmt("UNDO_RESPONSE", response=response, color=undo_color))
+        if response == "y":
+            ok, err = self.state.undo_last_move(undo_color)
+            if ok:
+                self.broadcast_state()
+                self.status = "[UNDO] Last move undone!"
+            else:
+                self.status = f"[UNDO] Failed: {err}"
+        else:
+            self.status = "[UNDO] You declined undo request."
+    
+    def handle_command(self, cmd: str) -> bool:
+        """Handle a command. Returns True if should continue, False to quit."""
+        if cmd == "/quit":
+            return False
+        
+        if cmd == "/help":
+            help_cmds = "/swap /restart /undo /quit /help"
+            if self.state.game_started:
+                help_cmds = "/restart /undo /quit /help"
+            self.status = f"Input: 'x y' (e.g. 8 8) or 'H8' (A-O + 1-15).\nCommands: {help_cmds}"
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        if cmd == "/swap":
+            return self._handle_swap_command()
+        
+        if cmd == "/restart":
+            return self._handle_restart_command()
+        
+        if cmd == "/undo":
+            return self._handle_undo_command()
+        
+        return True
+    
+    def _handle_swap_command(self) -> bool:
+        """Handle /swap command"""
+        if self.state.game_started:
+            self.status = "[ERR] /swap is only available before the game starts."
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        if self.my_color is None:
+            self.status = "[ERR] Not connected yet. Wait for match to start."
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        self.send_message(fmt("SWAP_REQUEST"))
+        self.status = "[SWAP] Request sent. Waiting for response..."
+        with self.render_lock:
+            self.render(self.status)
+        
+        # Wait for response
+        return self._wait_for_response("SWAP_RESPONSE", self._process_swap_response)
+    
+    def _process_swap_response(self, kv: dict):
+        """Process SWAP_RESPONSE"""
+        response = kv.get("response", "n").lower()
+        if response == "y":
+            self.my_color, self.opp_color = self.opp_color, self.my_color
+            self.state.turn = self.my_color
+            self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
+        else:
+            self.status = f"[SWAP] {self.opp_name} declined swap request."
+    
+    def _handle_restart_command(self) -> bool:
+        """Handle /restart command"""
+        self.send_message(fmt("RESTART_REQUEST"))
+        self.status = "[RESTART] Request sent. Waiting for response..."
+        with self.render_lock:
+            self.render(self.status)
+        
+        return self._wait_for_response("RESTART_RESPONSE", self._process_restart_response)
+    
+    def _process_restart_response(self, kv: dict):
+        """Process RESTART_RESPONSE"""
+        response = kv.get("response", "n").lower()
+        if response == "y":
+            self.state.reset()
+            self.broadcast_state()
+            self.status = "[RESTART] Game restarted!"
+        else:
+            self.status = f"[RESTART] {self.opp_name} declined restart request."
+    
+    def _handle_undo_command(self) -> bool:
+        """Handle /undo command"""
+        if self.state.game_over:
+            self.status = "[ERR] Game is over. Cannot undo."
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        if not self.state.game_started or not self.state.move_history:
+            self.status = "[ERR] No moves to undo."
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        last_x, last_y, last_color = self.state.move_history[-1]
+        if last_color != self.my_color:
+            self.status = "[ERR] Can only undo your own last move."
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        
+        self.send_message(fmt("UNDO_REQUEST", color=self.my_color))
+        self.status = "[UNDO] Request sent. Waiting for response..."
+        with self.render_lock:
+            self.render(self.status)
+        
+        return self._wait_for_response("UNDO_RESPONSE", self._process_undo_response)
+    
+    def _process_undo_response(self, kv: dict):
+        """Process UNDO_RESPONSE"""
+        response = kv.get("response", "n").lower()
+        if response == "y":
+            ok, err = self.state.undo_last_move(self.my_color)
+            if ok:
+                self.broadcast_state()
+                self.status = "[UNDO] Last move undone!"
+            else:
+                self.status = f"[UNDO] Failed: {err}"
+        else:
+            self.status = f"[UNDO] {self.opp_name} declined undo request."
+    
+    def _wait_for_response(self, expected_cmd: str, process_fn: Callable) -> bool:
+        """Wait for a specific response command. Returns True to continue."""
+        while True:
+            try:
+                l = self.q_in.get(timeout=30)
+                if l is None:
+                    self.status = "[DISCONNECTED] Opponent left."
+                    self.state.game_over = True
+                    with self.render_lock:
+                        self.render(self.status)
+                    return True
+                
+                cmd, kv = parse_line(l)
+                if cmd == expected_cmd:
+                    process_fn(kv)
+                    with self.render_lock:
+                        self.render(self.status)
+                    return True
+                else:
+                    self.q_in.put(l)
+                    time.sleep(0.1)
+            except queue.Empty:
+                self.status = f"[{expected_cmd.replace('_', ' ').title()}] Request timeout."
+                with self.render_lock:
+                    self.render(self.status)
+                return True
+    
+    def process_incoming_messages(self) -> bool:
+        """Process all pending incoming messages. Returns False if disconnected."""
         try:
             while True:
-                l = q_in.get_nowait()
+                l = self.q_in.get_nowait()
                 if l is None:
-                    status = "[DISCONNECTED] Host left."
-                    game_over = True
-                    with render_lock:
-                        render()
-                    break
-                cmd, kv = parse_line(l)
-                if cmd == "MATCH":
-                    my_color = kv.get("color", "X")
-                    status = f"[MATCH] You are {'O (first)' if my_color=='O' else 'X (second)'}"
-                    # If this is after a swap, update status
-                    if pending_request == "swap":
-                        status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
-                        pending_request = None
-                    with render_lock:
-                        render()
-                elif cmd == "SWAP_REQUEST":
-                    if game_started:
-                        ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
-                        continue
-                    pending_request = "swap"
-                    status = f"[REQUEST] Host wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
-                    with render_lock:
-                        render()
-                elif cmd == "SWAP_RESPONSE":
-                    response = kv.get("response", "n").lower()
-                    if response == "y":
-                        # Color and turn will be updated by MATCH and TURN messages
-                        status = "[SWAP] Swap accepted. Waiting for color update..."
-                    else:
-                        status = "[SWAP] Host declined swap request."
-                    with render_lock:
-                        render()
-                elif cmd == "TURN":
-                    turn = kv.get("color")
-                    with render_lock:
-                        render()
-                elif cmd == "OK":
-                    x = int(kv.get("x", "0")); y = int(kv.get("y", "0"))
-                    color = kv.get("color", "?")
-                    apply_ok(x, y, color)
-                    status = f"[MOVE] {('X(B)' if color=='B' else 'O(W)')} -> {x},{y}"
-                    with render_lock:
-                        render()
-                elif cmd == "ERR":
-                    status = f"[ERR] {kv.get('code','')}: {kv.get('msg','')}"
-                    with render_lock:
-                        render()
-                elif cmd == "WIN":
-                    color = kv.get("color", "?")
-                    status = f"[WIN] {('X(B)' if color=='B' else 'O(W)')} wins!"
-                    game_over = True
-                    with render_lock:
-                        render()
-                elif cmd == "BOARD":
-                    # reset board snapshot and move history
-                    for yy in range(SIZE):
-                        for xx in range(SIZE):
-                            board[yy][xx] = "."
-                    move_history = []  # Clear history when board is reset
-                    status = "[STATE] Board snapshot..."
-                    with render_lock:
-                        render()
-                elif cmd == "STONE":
-                    x = int(kv.get("x", "0")); y = int(kv.get("y", "0"))
-                    color = kv.get("color", ".")
-                    if in_bounds(x, y):
-                        board[y-1][x-1] = color
-                elif cmd == "CHAT":
-                    status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
-                    with render_lock:
-                        render()
-                elif cmd == "RESTART_REQUEST":
-                    pending_request = "restart"
-                    status = f"[REQUEST] Host wants to RESTART. Type 'y' to accept or 'n' to decline: "
-                    with render_lock:
-                        render()
-                elif cmd == "RESTART_RESPONSE":
-                    response = kv.get("response", "n").lower()
-                    if response == "y":
-                        reset_game()
-                        status = "[RESTART] Game restarted!"
-                    else:
-                        status = "[RESTART] Host declined restart request."
-                    with render_lock:
-                        render()
-                elif cmd == "UNDO_REQUEST":
-                    requesting_color = kv.get("color", "X")
-                    # Verify that last move belongs to the requester
-                    if not move_history or move_history[-1][2] != requesting_color:
-                        ls.send_line(fmt("ERR", code="INVALID_UNDO", msg="Last move is not yours"))
-                        continue
-                    pending_request = "undo"
-                    pending_undo_color = requesting_color
-                    status = f"[REQUEST] Host wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
-                    with render_lock:
-                        render()
-                elif cmd == "UNDO_RESPONSE":
-                    response = kv.get("response", "n").lower()
-                    if response == "y":
-                        requesting_color = kv.get("color", my_color)
-                        ok, err = undo_last_move(requesting_color)
-                        if ok:
-                            status = "[UNDO] Last move undone!"
-                        else:
-                            status = f"[UNDO] Failed: {err}"
-                    else:
-                        status = "[UNDO] Host declined undo request."
-                    with render_lock:
-                        render()
-                elif cmd == "WELCOME":
-                    # ignore
-                    pass
-                else:
-                    status = f"[WARN] Unknown cmd: {cmd}"
-                    with render_lock:
-                        render()
+                    self.status = "[DISCONNECTED] Opponent left."
+                    self.state.game_over = True
+                    with self.render_lock:
+                        self.render(self.status)
+                    return False
+                
+                if not self.process_message(l):
+                    return False
         except queue.Empty:
             pass
-
-        # local input (non-blocking with periodic updates)
-        s = None
-        if os.name == "nt":  # Windows
-            print("> ", end="", flush=True)
-            input_buffer = ""
-            while True:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getch()
-                    if ch == b'\r':  # Enter
-                        print()  # newline
-                        s = input_buffer.strip()
-                        break
-                    elif ch == b'\x08':  # Backspace
-                        if input_buffer:
-                            input_buffer = input_buffer[:-1]
-                            print('\b \b', end='', flush=True)
-                    elif ch == b'\x03':  # Ctrl+C
-                        s = "/quit"
-                        break
-                    else:
-                        try:
-                            char = ch.decode('utf-8')
-                            if char.isprintable():
-                                input_buffer += char
-                                print(char, end='', flush=True)
-                        except:
-                            pass
-                else:
-                    # Check for messages and render updates
-                    try:
-                        l = q_in.get_nowait()
-                        if l is None:
-                            status = "[DISCONNECTED] Host left."
-                            game_over = True
-                            with render_lock:
-                                render()
-                            break
-                        cmd, kv = parse_line(l)
-                        if cmd == "MATCH":
-                            my_color = kv.get("color", "X")
-                            # Check if this is after a swap
-                            if pending_request == "swap":
-                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
-                                pending_request = None
-                            else:
-                                status = f"[MATCH] You are {'O (first)' if my_color=='O' else 'X (second)'}"
-                            with render_lock:
-                                render()
-                        elif cmd == "SWAP_REQUEST":
-                            if game_started:
-                                ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
-                                print("> ", end="", flush=True)
-                                print(input_buffer, end="", flush=True)
-                                continue
-                            pending_request = "swap"
-                            status = f"[REQUEST] Host wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "SWAP_RESPONSE":
-                            response = kv.get("response", "n").lower()
-                            if response == "y":
-                                # Swap colors and turn
-                                my_color = "O" if my_color == "X" else "X"
-                                turn = my_color  # Turn goes to the player who requested swap
-                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                            else:
-                                status = "[SWAP] Host declined swap request."
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "TURN":
-                            turn = kv.get("color")
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "OK":
-                            x = int(kv.get("x", "0")); y = int(kv.get("y", "0"))
-                            color = kv.get("color", "?")
-                            apply_ok(x, y, color)
-                            status = f"[MOVE] {('X(B)' if color=='B' else 'O(W)')} -> {x},{y}"
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "ERR":
-                            status = f"[ERR] {kv.get('code','')}: {kv.get('msg','')}"
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "WIN":
-                            color = kv.get("color", "?")
-                            status = f"[WIN] {('X(B)' if color=='B' else 'O(W)')} wins!"
-                            game_over = True
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "BOARD":
-                            for yy in range(SIZE):
-                                for xx in range(SIZE):
-                                    board[yy][xx] = "."
-                            move_history.clear()  # Clear history when board is reset
-                            status = "[STATE] Board snapshot..."
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "STONE":
-                            x = int(kv.get("x", "0")); y = int(kv.get("y", "0"))
-                            color = kv.get("color", ".")
-                            if in_bounds(x, y):
-                                board[y-1][x-1] = color
-                        elif cmd == "CHAT":
-                            status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "RESTART_REQUEST":
-                            pending_request = "restart"
-                            status = f"[REQUEST] Host wants to RESTART. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                        elif cmd == "UNDO_REQUEST":
-                            requesting_color = kv.get("color", "X")
-                            if not move_history or move_history[-1][2] != requesting_color:
-                                ls.send_line(fmt("ERR", code="INVALID_UNDO", msg="Last move is not yours"))
-                                print("> ", end="", flush=True)
-                                print(input_buffer, end="", flush=True)
-                                continue
-                            pending_request = "undo"
-                            pending_undo_color = requesting_color
-                            status = f"[REQUEST] Host wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render()
-                            print("> ", end="", flush=True)
-                            print(input_buffer, end="", flush=True)
-                    except queue.Empty:
-                        pass
-                    time.sleep(0.1)
-        else:  # Unix/Linux
-            # Non-blocking input: check for messages while waiting
-            input_ready = False
-            while not input_ready:
-                # Check stdin with short timeout
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    try:
-                        s = input("> ").strip()
-                        input_ready = True
-                    except (EOFError, KeyboardInterrupt):
-                        s = "/quit"
-                        input_ready = True
-                else:
-                    # Check for incoming messages
-                    try:
-                        l = q_in.get_nowait()
-                        if l is None:
-                            status = "[DISCONNECTED] Host left."
-                            game_over = True
-                            with render_lock:
-                                render()
-                            s = None
-                            input_ready = True
-                            break
-                        cmd, kv = parse_line(l)
-                        if cmd == "MATCH":
-                            my_color = kv.get("color", "X")
-                            # Check if this is after a swap
-                            if pending_request == "swap":
-                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
-                                pending_request = None
-                            else:
-                                status = f"[MATCH] You are {'O (first)' if my_color=='O' else 'X (second)'}"
-                            with render_lock:
-                                render()
-                        elif cmd == "SWAP":
-                            if my_color:
-                                my_color = "O" if my_color == "X" else "X"
-                                # Turn will be set by TURN message that follows
-                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}."
-                                with render_lock:
-                                    render()
-                                print("> ", end="", flush=True)
-                                print(input_buffer, end="", flush=True)
-                        elif cmd == "TURN":
-                            turn = kv.get("color")
-                            with render_lock:
-                                render()
-                        elif cmd == "OK":
-                            x = int(kv.get("x", "0")); y = int(kv.get("y", "0"))
-                            color = kv.get("color", "?")
-                            apply_ok(x, y, color)
-                            status = f"[MOVE] {('X(B)' if color=='B' else 'O(W)')} -> {x},{y}"
-                            with render_lock:
-                                render()
-                        elif cmd == "ERR":
-                            status = f"[ERR] {kv.get('code','')}: {kv.get('msg','')}"
-                            with render_lock:
-                                render()
-                        elif cmd == "WIN":
-                            color = kv.get("color", "?")
-                            status = f"[WIN] {('X(B)' if color=='B' else 'O(W)')} wins!"
-                            game_over = True
-                            with render_lock:
-                                render()
-                        elif cmd == "BOARD":
-                            for yy in range(SIZE):
-                                for xx in range(SIZE):
-                                    board[yy][xx] = "."
-                            move_history.clear()  # Clear history when board is reset
-                            status = "[STATE] Board snapshot..."
-                            with render_lock:
-                                render()
-                        elif cmd == "STONE":
-                            x = int(kv.get("x", "0")); y = int(kv.get("y", "0"))
-                            color = kv.get("color", ".")
-                            if in_bounds(x, y):
-                                board[y-1][x-1] = color
-                        elif cmd == "CHAT":
-                            status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
-                            with render_lock:
-                                render()
-                        elif cmd == "SWAP_REQUEST":
-                            if game_started:
-                                ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
-                                continue
-                            pending_request = "swap"
-                            status = f"[REQUEST] Host wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render()
-                        elif cmd == "SWAP_RESPONSE":
-                            response = kv.get("response", "n").lower()
-                            if response == "y":
-                                # Swap colors and turn
-                                my_color = "O" if my_color == "X" else "X"
-                                turn = my_color  # Turn goes to the player who requested swap
-                                status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                            else:
-                                status = "[SWAP] Host declined swap request."
-                            with render_lock:
-                                render()
-                        elif cmd == "TURN":
-                            turn = kv.get("color")
-                            with render_lock:
-                                render()
-                        elif cmd == "RESTART_REQUEST":
-                            pending_request = "restart"
-                            status = f"[REQUEST] Host wants to RESTART. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render()
-                        elif cmd == "UNDO_REQUEST":
-                            pending_request = "undo"
-                            status = f"[REQUEST] Host wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
-                            with render_lock:
-                                render()
-                    except queue.Empty:
-                        pass
-
-        if s is None:
-            # No input available, continue to check messages
-            continue
-
-        # Check for pending request (y/n response)
-        if pending_request:
-            s_lower = s.strip().lower()
-            if s_lower in ("y", "yes", "n", "no"):
-                response = "y" if s_lower in ("y", "yes") else "n"
-                if pending_request == "swap":
-                    ls.send_line(fmt("SWAP_RESPONSE", response=response))
-                    if response == "y":
-                        # Swap colors and turn
-                        my_color = "O" if my_color == "X" else "X"
-                        turn = "O" if my_color == "X" else "X"  # Turn goes to the player who requested swap (host)
-                        status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                    else:
-                        status = "[SWAP] You declined swap request."
-                elif pending_request == "restart":
-                    ls.send_line(fmt("RESTART_RESPONSE", response=response))
-                    if response == "y":
-                        reset_game()
-                        status = "[RESTART] Game restarted!"
-                    else:
-                        status = "[RESTART] You declined restart request."
-                elif pending_request == "undo":
-                    undo_color = pending_undo_color if pending_undo_color else "X"
-                    ls.send_line(fmt("UNDO_RESPONSE", response=response, color=undo_color))
-                    if response == "y":
-                        ok, err = undo_last_move(undo_color)
-                        if ok:
-                            status = "[UNDO] Last move undone!"
-                        else:
-                            status = f"[UNDO] Failed: {err}"
-                    else:
-                        status = "[UNDO] You declined undo request."
-                pending_request = None
-                pending_undo_color = None
-                with render_lock:
-                    render()
-                continue
-            else:
-                status = "[ERR] Please type 'y' or 'n' to respond to the request."
-                with render_lock:
-                    render()
-                continue
-
-        parsed = parse_move_input(s)
-        if parsed == "/quit":
-            break
-        if parsed == "/help":
-            help_cmds = "/swap /restart /undo /quit /help"
-            if game_started:
-                help_cmds = "/restart /undo /quit /help"
-            status = f"Moves: 'x y' or 'H8'. Commands: {help_cmds}"
-            with render_lock:
-                render()
-            continue
-        if parsed == "/swap":
-            if game_started:
-                status = "[ERR] /swap is only available before the game starts."
-                with render_lock:
-                    render()
-                continue
-            if my_color is None:
-                status = "[ERR] Not connected yet. Wait for match to start."
-                with render_lock:
-                    render()
-                continue
-            ls.send_line(fmt("SWAP_REQUEST"))
-            status = "[SWAP] Request sent to host. Waiting for response..."
-            with render_lock:
-                render()
-            # Wait for response
-            response_received = False
-            while not response_received:
-                try:
-                    l = q_in.get(timeout=30)  # 30 second timeout
-                    if l is None:
-                        status = "[DISCONNECTED] Host left."
-                        game_over = True
-                        with render_lock:
-                            render()
-                        break
-                    cmd, kv = parse_line(l)
-                    if cmd == "SWAP_RESPONSE":
-                        response = kv.get("response", "n").lower()
-                        if response == "y":
-                            # Swap colors and turn
-                            my_color = "O" if my_color == "X" else "X"
-                            turn = my_color  # Turn goes to the player who requested swap
-                            status = f"[SWAP] Colors swapped. You are now {'O' if my_color=='O' else 'X'}. Turn: {turn}"
-                        else:
-                            status = "[SWAP] Host declined swap request."
-                        with render_lock:
-                            render()
-                        response_received = True
-                    else:
-                        # Handle other commands normally
-                        q_in.put(l)  # Put back for normal processing
-                        time.sleep(0.1)
-                except queue.Empty:
-                    status = "[SWAP] Request timeout. Host did not respond."
-                    with render_lock:
-                        render()
-                    response_received = True
-            continue
-        if parsed == "/restart":
-            ls.send_line(fmt("RESTART_REQUEST"))
-            status = "[RESTART] Request sent to host. Waiting for response..."
-            with render_lock:
-                render()
-            # Wait for response
-            response_received = False
-            while not response_received:
-                try:
-                    l = q_in.get(timeout=30)  # 30 second timeout
-                    if l is None:
-                        status = "[DISCONNECTED] Host left."
-                        game_over = True
-                        with render_lock:
-                            render()
-                        break
-                    cmd, kv = parse_line(l)
-                    if cmd == "RESTART_RESPONSE":
-                        response = kv.get("response", "n").lower()
-                        if response == "y":
-                            reset_game()
-                            status = "[RESTART] Game restarted!"
-                        else:
-                            status = "[RESTART] Host declined restart request."
-                        with render_lock:
-                            render()
-                        response_received = True
-                    else:
-                        # Handle other commands normally
-                        q_in.put(l)  # Put back for normal processing
-                        time.sleep(0.1)
-                except queue.Empty:
-                    status = "[RESTART] Request timeout. Host did not respond."
-                    with render_lock:
-                        render()
-                    response_received = True
-            continue
-        if parsed == "/undo":
-            if game_over:
-                status = "[ERR] Game is over. Cannot undo."
-                with render_lock:
-                    render()
-                continue
-            if not game_started or not move_history:
-                status = "[ERR] No moves to undo."
-                with render_lock:
-                    render()
-                continue
-            # Check if last move belongs to the requester
-            last_x, last_y, last_color = move_history[-1]
-            if last_color != my_color:
-                status = "[ERR] Can only undo your own last move."
-                with render_lock:
-                    render()
-                continue
-            ls.send_line(fmt("UNDO_REQUEST", color=my_color))
-            status = "[UNDO] Request sent to host. Waiting for response..."
-            with render_lock:
-                render()
-            # Wait for response
-            response_received = False
-            while not response_received:
-                try:
-                    l = q_in.get(timeout=30)  # 30 second timeout
-                    if l is None:
-                        status = "[DISCONNECTED] Host left."
-                        game_over = True
-                        with render_lock:
-                            render()
-                        break
-                    cmd, kv = parse_line(l)
-                    if cmd == "UNDO_RESPONSE":
-                        response = kv.get("response", "n").lower()
-                        if response == "y":
-                            requesting_color = kv.get("color", my_color)
-                            ok, err = undo_last_move(requesting_color)
-                            if ok:
-                                status = "[UNDO] Last move undone!"
-                            else:
-                                status = f"[UNDO] Failed: {err}"
-                        else:
-                            status = "[UNDO] Host declined undo request."
-                        with render_lock:
-                            render()
-                        response_received = True
-                    else:
-                        # Handle other commands normally
-                        q_in.put(l)  # Put back for normal processing
-                        time.sleep(0.1)
-                except queue.Empty:
-                    status = "[UNDO] Request timeout. Host did not respond."
-                    with render_lock:
-                        render()
-                    response_received = True
-            continue
-        if parsed == "invalid":
-            status = "[ERR] Invalid input. Example: 8 8 or H8"
-            with render_lock:
-                render()
-            continue
-        if isinstance(parsed, tuple):
-            if game_over:
-                status = "[ERR] Game over."
-                with render_lock:
-                    render()
-                continue
-            if my_color is None or turn is None:
-                status = "[ERR] Not ready yet."
-                with render_lock:
-                    render()
-                continue
-            x, y = parsed
-            if turn != my_color:
-                status = "[ERR] Not your turn."
-                with render_lock:
-                    render()
-                continue
-            ls.send_line(fmt("MOVE", x=str(x), y=str(y)))
-            status = f"[SENT] MOVE {x},{y}"
-            with render_lock:
-                render()
-            continue
-
-    try:
-        sock.close()
-    except Exception:
+        return True
+    
+    @abstractmethod
+    def process_message(self, line: str) -> bool:
+        """Process a single incoming message. Returns True to continue."""
         pass
-    print("Bye.")
+    
+    def run(self):
+        """Main game loop"""
+        if not self.setup_connection():
+            return
+        
+        self.start_receiver_thread()
+        self.render()
+        self.show_commands = False
+        
+        input_handler = InputHandler(self.q_in, self._on_message_during_input)
+        
+        while True:
+            # Process incoming messages
+            if not self.process_incoming_messages():
+                if self.state.game_over:
+                    pass  # Allow /quit
+                else:
+                    break
+            
+            # Get input
+            s = input_handler.get_input()
+            
+            if s is None:
+                continue
+            
+            # Handle pending request
+            if self.handle_pending_request(s):
+                continue
+            
+            # Parse input
+            parsed = parse_move_input(s)
+            
+            # Handle commands
+            if isinstance(parsed, str) and parsed.startswith("/"):
+                if not self.handle_command(parsed):
+                    break
+                continue
+            
+            if parsed == "invalid":
+                self.status = "[ERR] Invalid input. Example: 8 8 or H8"
+                with self.render_lock:
+                    self.render(self.status)
+                continue
+            
+            if isinstance(parsed, tuple):
+                if not self._handle_move_input(parsed):
+                    continue
+        
+        self.cleanup()
+        print("Bye.")
+    
+    @abstractmethod
+    def _on_message_during_input(self, line: str) -> bool:
+        """Handle a message received during input. Returns True if reprompt needed."""
+        pass
+    
+    @abstractmethod
+    def _handle_move_input(self, coords: Tuple[int, int]) -> bool:
+        """Handle move input. Returns True if move was attempted."""
+        pass
+
+# ---------------- Host Session ----------------
+
+class HostSession(GomokuSession):
+    """Host-side game session"""
+    
+    def __init__(self, port: int, renju_rules: bool = True):
+        super().__init__()
+        self.port = port
+        self.state.renju_rules = renju_rules
+        self.my_color = "O"
+        self.opp_color = "X"
+        self.my_name = "Host"
+        self.srv: Optional[socket.socket] = None
+        self.conn: Optional[socket.socket] = None
+    
+    def setup_connection(self) -> bool:
+        """Setup the server and wait for connection"""
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(("0.0.0.0", self.port))
+        self.srv.listen(1)
+        
+        print(f"[HOST] Listening on 0.0.0.0:{self.port} ...")
+        print("[HOST] Waiting for one opponent to join...")
+        
+        self.conn, addr = self.srv.accept()
+        self.conn.settimeout(None)
+        self.ls = LineSocket(self.conn)
+        print(f"[HOST] Opponent connected from {addr[0]}:{addr[1]}")
+        
+        # Handshake
+        line = self.ls.recv_line()
+        if line is None:
+            print("[HOST] Connection closed during HELLO.")
+            return False
+        
+        cmd, kv = parse_line(line)
+        if cmd != "HELLO":
+            self.ls.send_line(fmt("ERR", code="BAD_HELLO", msg="expected HELLO"))
+            print("[HOST] Bad HELLO, closing.")
+            return False
+        
+        self.opp_name = kv.get("name", "Player")
+        
+        # Send welcome
+        self.ls.send_line(fmt("WELCOME", v="1", id="remote", role="GUEST"))
+        self.ls.send_line(fmt("MATCH", color="X", size=str(SIZE), win=str(WIN)))
+        self.ls.send_line(fmt("TURN", color=self.state.turn))
+        
+        return True
+    
+    def send_message(self, msg: str):
+        """Send message to the client"""
+        self.ls.send_line(msg)
+    
+    def broadcast_state(self):
+        """Broadcast the current game state to client"""
+        self.ls.send_line(fmt("BOARD", size=str(SIZE)))
+        for y in range(1, SIZE+1):
+            for x in range(1, SIZE+1):
+                c = self.state.board[y-1][x-1]
+                if c in ("O", "X"):
+                    self.ls.send_line(fmt("STONE", x=str(x), y=str(y), color=c))
+        self.ls.send_line(fmt("TURN", color=self.state.turn))
+    
+    def handle_move(self, x: int, y: int, color: str) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """Handle a move and broadcast result"""
+        ok, err = self.state.apply_move(x, y, color)
+        
+        if ok:
+            self.ls.send_line(fmt("OK", move=str(self.state.move_no), x=str(x), y=str(y), color=color))
+            if self.state.game_over:
+                self.ls.send_line(fmt("WIN", color=color, x=str(x), y=str(y)))
+            else:
+                self.ls.send_line(fmt("TURN", color=self.state.turn))
+        
+        return ok, err
+    
+    def cleanup(self):
+        """Cleanup server resources"""
+        try:
+            self.ls.send_line(fmt("SAY", text="(host left)"))
+        except:
+            pass
+        try:
+            self.conn.close()
+        except:
+            pass
+        try:
+            self.srv.close()
+        except:
+            pass
+    
+    def process_message(self, line: str) -> bool:
+        """Process incoming message from client"""
+        cmd, kv = parse_line(line)
+        
+        if cmd == "MOVE":
+            return self._process_move(kv)
+        elif cmd == "SAY":
+            self.status = f"[CHAT] {self.opp_name}: {kv.get('text','')}"
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "SWAP_REQUEST":
+            return self._process_swap_request()
+        elif cmd == "SWAP_RESPONSE":
+            return self._process_swap_response_received(kv)
+        elif cmd == "RESTART_REQUEST":
+            self.pending_request = "restart"
+            self.status = f"[REQUEST] {self.opp_name} wants to RESTART. Type 'y' to accept or 'n' to decline: "
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "RESTART_RESPONSE":
+            return self._process_restart_response_received(kv)
+        elif cmd == "UNDO_REQUEST":
+            return self._process_undo_request(kv)
+        elif cmd == "UNDO_RESPONSE":
+            return self._process_undo_response_received(kv)
+        elif cmd == "HELLO":
+            pass  # Already handled
+        else:
+            self.ls.send_line(fmt("ERR", code="UNKNOWN_CMD", msg=f"unknown {cmd}"))
+        
+        return True
+    
+    def _process_move(self, kv: dict) -> bool:
+        """Process a MOVE command from client"""
+        try:
+            x = int(kv.get("x", "0"))
+            y = int(kv.get("y", "0"))
+        except ValueError:
+            self.ls.send_line(fmt("ERR", code="BAD_MOVE", msg="invalid x/y"))
+            return True
+        
+        ok, err = self.handle_move(x, y, self.opp_color)
+        if not ok:
+            code, msg = err
+            self.ls.send_line(fmt("ERR", code=code, msg=msg))
+        
+        self.status = f"[OPP MOVE] {x},{y}"
+        with self.render_lock:
+            self.render(self.status)
+        return True
+    
+    def _process_swap_request(self) -> bool:
+        """Process SWAP_REQUEST from client"""
+        if self.state.game_started:
+            self.ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
+            return True
+        
+        self.pending_request = "swap"
+        self.status = f"[REQUEST] {self.opp_name} wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
+        with self.render_lock:
+            self.render(self.status)
+        return True
+    
+    def _process_swap_response_received(self, kv: dict) -> bool:
+        """Process SWAP_RESPONSE from client (when we requested)"""
+        response = kv.get("response", "n").lower()
+        if response == "y":
+            self.my_color, self.opp_color = self.opp_color, self.my_color
+            self.state.turn = self.my_color
+            self.ls.send_line(fmt("MATCH", color=self.opp_color, size=str(SIZE), win=str(WIN)))
+            self.ls.send_line(fmt("TURN", color=self.state.turn))
+            self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
+        else:
+            self.status = f"[SWAP] {self.opp_name} declined swap request."
+        with self.render_lock:
+            self.render(self.status)
+        return True
+    
+    def _process_restart_response_received(self, kv: dict) -> bool:
+        """Process RESTART_RESPONSE from client"""
+        response = kv.get("response", "n").lower()
+        if response == "y":
+            self.state.reset()
+            self.broadcast_state()
+            self.status = "[RESTART] Game restarted!"
+        else:
+            self.status = f"[RESTART] {self.opp_name} declined restart request."
+        with self.render_lock:
+            self.render(self.status)
+        return True
+    
+    def _process_undo_request(self, kv: dict) -> bool:
+        """Process UNDO_REQUEST from client"""
+        requesting_color = kv.get("color", self.opp_color)
+        if not self.state.move_history or self.state.move_history[-1][2] != requesting_color:
+            self.ls.send_line(fmt("ERR", code="INVALID_UNDO", msg="Last move is not yours"))
+            return True
+        
+        self.pending_request = "undo"
+        self.pending_undo_color = requesting_color
+        self.status = f"[REQUEST] {self.opp_name} wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
+        with self.render_lock:
+            self.render(self.status)
+        return True
+    
+    def _process_undo_response_received(self, kv: dict) -> bool:
+        """Process UNDO_RESPONSE from client"""
+        response = kv.get("response", "n").lower()
+        if response == "y":
+            requesting_color = kv.get("color", self.opp_color)
+            ok, err = self.state.undo_last_move(requesting_color)
+            if ok:
+                self.broadcast_state()
+                self.status = "[UNDO] Last move undone!"
+            else:
+                self.status = f"[UNDO] Failed: {err}"
+        else:
+            self.status = f"[UNDO] {self.opp_name} declined undo request."
+        with self.render_lock:
+            self.render(self.status)
+        return True
+    
+    def _on_message_during_input(self, line: str) -> bool:
+        """Handle message received during input"""
+        cmd, kv = parse_line(line)
+        
+        if cmd == "MOVE":
+            self._process_move(kv)
+            return True
+        elif cmd == "SAY":
+            self.status = f"[CHAT] {self.opp_name}: {kv.get('text','')}"
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        elif cmd == "SWAP_REQUEST":
+            self._process_swap_request()
+            return True
+        elif cmd == "SWAP_RESPONSE":
+            self._process_swap_response_received(kv)
+            return True
+        elif cmd == "RESTART_REQUEST":
+            self.pending_request = "restart"
+            self.status = f"[REQUEST] {self.opp_name} wants to RESTART. Type 'y' to accept or 'n' to decline: "
+            with self.render_lock:
+                self.render(self.status)
+            return True
+        elif cmd == "UNDO_REQUEST":
+            self._process_undo_request(kv)
+            return True
+        
+        return False
+    
+    def _handle_move_input(self, coords: Tuple[int, int]) -> bool:
+        """Handle move input from local user"""
+        x, y = coords
+        ok, err = self.handle_move(x, y, self.my_color)
+        if not ok:
+            code, msg = err
+            self.status = f"[ERR] {code}: {msg}"
+        else:
+            self.status = f"[YOU MOVE] {x},{y}"
+        with self.render_lock:
+            self.render(self.status)
+        return True
+
+# ---------------- Guest Session ----------------
+
+class GuestSession(GomokuSession):
+    """Guest-side game session"""
+    
+    def __init__(self, host: str, port: int, name: str):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.my_name = name
+        self.opp_name = "Host"
+        self.sock: Optional[socket.socket] = None
+    
+    def setup_connection(self) -> bool:
+        """Connect to host"""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((self.host, self.port))
+        self.ls = LineSocket(self.sock)
+        
+        # Send HELLO
+        self.ls.send_line(fmt("HELLO", v="1", name=self.my_name))
+        return True
+    
+    def send_message(self, msg: str):
+        """Send message to host"""
+        self.ls.send_line(msg)
+    
+    def broadcast_state(self):
+        """Guest doesn't broadcast - host handles this"""
+        pass
+    
+    def handle_move(self, x: int, y: int, color: str) -> Tuple[bool, Optional[Tuple[str, str]]]:
+        """Guest sends move to host"""
+        self.ls.send_line(fmt("MOVE", x=str(x), y=str(y)))
+        return True, None
+    
+    def cleanup(self):
+        """Cleanup socket"""
+        try:
+            self.sock.close()
+        except:
+            pass
+    
+    def process_message(self, line: str) -> bool:
+        """Process incoming message from host"""
+        cmd, kv = parse_line(line)
+        
+        if cmd == "WELCOME":
+            pass  # Ignore
+        elif cmd == "MATCH":
+            self.my_color = kv.get("color", "X")
+            self.opp_color = "O" if self.my_color == "X" else "X"
+            if self.pending_request == "swap":
+                self.status = f"[SWAP] Colors swapped. You are now {self.my_color}."
+                self.pending_request = None
+            else:
+                self.status = f"[MATCH] You are {'O (first)' if self.my_color=='O' else 'X (second)'}"
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "TURN":
+            self.state.turn = kv.get("color")
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "OK":
+            x = int(kv.get("x", "0"))
+            y = int(kv.get("y", "0"))
+            color = kv.get("color", "?")
+            self.state.apply_ok(x, y, color)
+            self.status = f"[MOVE] {color} -> {x},{y}"
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "ERR":
+            self.status = f"[ERR] {kv.get('code','')}: {kv.get('msg','')}"
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "WIN":
+            color = kv.get("color", "?")
+            self.status = f"[WIN] {color} wins!"
+            self.state.game_over = True
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "BOARD":
+            self.state.clear_board()
+            self.status = "[STATE] Board snapshot..."
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "STONE":
+            x = int(kv.get("x", "0"))
+            y = int(kv.get("y", "0"))
+            color = kv.get("color", ".")
+            if in_bounds(x, y):
+                self.state.board[y-1][x-1] = color
+        elif cmd == "CHAT":
+            self.status = f"[CHAT] {kv.get('from','?')}: {kv.get('text','')}"
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "SWAP_REQUEST":
+            if self.state.game_started:
+                self.ls.send_line(fmt("ERR", code="GAME_STARTED", msg="Cannot swap after game started"))
+                return True
+            self.pending_request = "swap"
+            self.status = f"[REQUEST] {self.opp_name} wants to SWAP colors. Type 'y' to accept or 'n' to decline: "
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "SWAP_RESPONSE":
+            response = kv.get("response", "n").lower()
+            if response == "y":
+                self.my_color = "O" if self.my_color == "X" else "X"
+                self.opp_color = "X" if self.my_color == "O" else "O"
+                self.state.turn = self.my_color
+                self.status = f"[SWAP] Colors swapped. You are now {self.my_color}. Turn: {self.state.turn}"
+            else:
+                self.status = f"[SWAP] {self.opp_name} declined swap request."
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "RESTART_REQUEST":
+            self.pending_request = "restart"
+            self.status = f"[REQUEST] {self.opp_name} wants to RESTART. Type 'y' to accept or 'n' to decline: "
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "RESTART_RESPONSE":
+            response = kv.get("response", "n").lower()
+            if response == "y":
+                self.state.reset()
+                self.status = "[RESTART] Game restarted!"
+            else:
+                self.status = f"[RESTART] {self.opp_name} declined restart request."
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "UNDO_REQUEST":
+            requesting_color = kv.get("color", "X")
+            if not self.state.move_history or self.state.move_history[-1][2] != requesting_color:
+                self.ls.send_line(fmt("ERR", code="INVALID_UNDO", msg="Last move is not yours"))
+                return True
+            self.pending_request = "undo"
+            self.pending_undo_color = requesting_color
+            self.status = f"[REQUEST] {self.opp_name} wants to UNDO last move. Type 'y' to accept or 'n' to decline: "
+            with self.render_lock:
+                self.render(self.status)
+        elif cmd == "UNDO_RESPONSE":
+            response = kv.get("response", "n").lower()
+            if response == "y":
+                requesting_color = kv.get("color", self.my_color)
+                ok, err = self.state.undo_last_move(requesting_color)
+                if ok:
+                    self.status = "[UNDO] Last move undone!"
+                else:
+                    self.status = f"[UNDO] Failed: {err}"
+            else:
+                self.status = f"[UNDO] {self.opp_name} declined undo request."
+            with self.render_lock:
+                self.render(self.status)
+        else:
+            self.status = f"[WARN] Unknown cmd: {cmd}"
+            with self.render_lock:
+                self.render(self.status)
+        
+        return True
+    
+    def _on_message_during_input(self, line: str) -> bool:
+        """Handle message received during input"""
+        self.process_message(line)
+        return True
+    
+    def _handle_move_input(self, coords: Tuple[int, int]) -> bool:
+        """Handle move input from local user"""
+        if self.state.game_over:
+            self.status = "[ERR] Game over."
+            with self.render_lock:
+                self.render(self.status)
+            return False
+        
+        if self.my_color is None or self.state.turn is None:
+            self.status = "[ERR] Not ready yet."
+            with self.render_lock:
+                self.render(self.status)
+            return False
+        
+        x, y = coords
+        if self.state.turn != self.my_color:
+            self.status = "[ERR] Not your turn."
+            with self.render_lock:
+                self.render(self.status)
+            return False
+        
+        self.ls.send_line(fmt("MOVE", x=str(x), y=str(y)))
+        self.status = f"[SENT] MOVE {x},{y}"
+        with self.render_lock:
+            self.render(self.status)
+        return True
+
+# ---------------- Wrapper functions for backward compatibility ----------------
+
+def run_host(port: int, renju_rules: bool = True):
+    """Run as host"""
+    session = HostSession(port, renju_rules)
+    session.run()
+
+def run_join(host: str, port: int, name: str):
+    """Run as guest"""
+    session = GuestSession(host, port, name)
+    session.run()
 
 # ---------------- Main ----------------
 
