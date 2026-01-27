@@ -16,10 +16,17 @@ class GomokuAI:
             c = self.board_size // 2
             return (c + 1, c + 1)
 
+        # 후보를 정렬하여 좋은 수를 먼저 탐색
+        candidates = self._sort_candidates(board, candidates, True)
+        
+        # 후보가 너무 많으면 상위 후보만 선택 (성능 향상)
+        if len(candidates) > 20:
+            candidates = candidates[:20]
+
         best_move = candidates[0]
         best_score = float("-inf")
 
-        # 2. Minimax 시작
+        # Minimax with alpha-beta pruning
         for move in candidates:
             y, x = move
             board[y][x] = self.color
@@ -34,13 +41,23 @@ class GomokuAI:
         return (x + 1, y + 1)
 
     def _minimax(self, board: List[List[str]], depth: int, is_maximizing: bool, alpha: float, beta: float) -> float:
-        # 기저 조건: 승리 혹은 깊이 도달
+        # 승리 체크 (깊이와 관계없이)
+        winner = self._check_winner(board)
+        if winner == self.color:
+            return 1000000 - depth  # 빠르게 승리할수록 높은 점수
+        elif winner == self.opponent:
+            return -1000000 + depth  # 상대가 빠르게 승리할수록 낮은 점수
+        
+        # 기저 조건: 깊이 도달
         if depth == 0:
             return self._evaluate_board(board)
 
         candidates = self._get_candidates(board)
         if not candidates:
             return 0
+
+        # 후보를 점수 순으로 정렬 (좋은 수를 먼저 탐색하여 alpha-beta pruning 효과 향상)
+        candidates = self._sort_candidates(board, candidates, is_maximizing)
 
         if is_maximizing:
             max_eval = float('-inf')
@@ -49,7 +66,7 @@ class GomokuAI:
                 eval = self._minimax(board, depth - 1, False, alpha, beta)
                 board[y][x] = "."
                 max_eval = max(max_eval, eval)
-                alpha = max(alpha, eval)
+                alpha = max(alpha, max_eval)  # 버그 수정: max_eval 사용
                 if beta <= alpha:
                     break
             return max_eval
@@ -60,7 +77,7 @@ class GomokuAI:
                 eval = self._minimax(board, depth - 1, True, alpha, beta)
                 board[y][x] = "."
                 min_eval = min(min_eval, eval)
-                beta = min(beta, eval)
+                beta = min(beta, min_eval)  # 버그 수정: min_eval 사용
                 if beta <= alpha:
                     break
             return min_eval
@@ -77,6 +94,50 @@ class GomokuAI:
                             if 0 <= ny < self.board_size and 0 <= nx < self.board_size and board[ny][nx] == ".":
                                 candidates.add((ny, nx))
         return list(candidates)
+    
+    def _sort_candidates(self, board: List[List[str]], candidates: List[Tuple[int, int]], is_maximizing: bool) -> List[Tuple[int, int]]:
+        """후보를 휴리스틱 점수 순으로 정렬 (좋은 수를 먼저 탐색)"""
+        def get_quick_score(move):
+            y, x = move
+            # 간단한 휴리스틱: 주변 돌의 개수와 패턴 점수
+            score = 0
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    if dx == 0 and dy == 0:
+                        continue
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < self.board_size and 0 <= nx < self.board_size:
+                        if board[ny][nx] == self.color:
+                            score += 10 if is_maximizing else -10
+                        elif board[ny][nx] == self.opponent:
+                            score += -10 if is_maximizing else 10
+            return score
+        
+        return sorted(candidates, key=get_quick_score, reverse=is_maximizing)
+    
+    def _check_winner(self, board: List[List[str]]) -> Optional[str]:
+        """보드에서 승리한 플레이어를 확인"""
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        
+        for y in range(self.board_size):
+            for x in range(self.board_size):
+                if board[y][x] == ".":
+                    continue
+                
+                color = board[y][x]
+                for dx, dy in directions:
+                    count = 1
+                    nx, ny = x + dx, y + dy
+                    while (0 <= nx < self.board_size and 0 <= ny < self.board_size and 
+                           board[ny][nx] == color):
+                        count += 1
+                        nx += dx
+                        ny += dy
+                    
+                    if count >= 5:
+                        return color
+        
+        return None
 
     def _evaluate_board(self, board: List[List[str]]) -> float:
         """현재 보드 상태의 점수를 계산 (핵심 로직)"""
