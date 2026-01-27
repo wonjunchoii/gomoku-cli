@@ -182,12 +182,18 @@ class GomokuAI:
                     back_x, back_y = x - dx, y - dy
                     
                     # 양쪽 끝의 상태 확인
-                    forward_open = (end_x < 0 or end_x >= self.board_size or 
-                                   end_y < 0 or end_y >= self.board_size or 
-                                   board[end_y][end_x] == ".")
-                    backward_open = (back_x < 0 or back_x >= self.board_size or 
-                                    back_y < 0 or back_y >= self.board_size or 
-                                    board[back_y][back_x] == ".")
+                    # 보드 밖이면 닫힌 끝 (False), 보드 안이면 빈칸인지 확인
+                    if (end_x < 0 or end_x >= self.board_size or 
+                        end_y < 0 or end_y >= self.board_size):
+                        forward_open = False
+                    else:
+                        forward_open = (board[end_y][end_x] == ".")
+                    
+                    if (back_x < 0 or back_x >= self.board_size or 
+                        back_y < 0 or back_y >= self.board_size):
+                        backward_open = False
+                    else:
+                        backward_open = (board[back_y][back_x] == ".")
                     
                     # 패턴 점수 계산
                     pattern_score = self._get_pattern_score(count, forward_open, backward_open)
