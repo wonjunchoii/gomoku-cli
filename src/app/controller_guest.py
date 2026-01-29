@@ -48,6 +48,7 @@ class GuestController(BaseController):
         self.host = host
         self.port = port
         self.name = name
+        self._you_color: Player = Player.WHITE
 
         self.transport: Optional[Transport] = None
         self.host_name: str = "Host"
@@ -55,16 +56,15 @@ class GuestController(BaseController):
         # These are determined by MATCH
         self.renju: bool = True
         self.board_size: int = 15
-        self.you_color: Player = Player.WHITE  # default; host will tell us
 
         # placeholder local game (will be recreated after MATCH)
-        game = Game(board_size=15, starting_player=Player.BLACK, renju=True)
+        game = Game(board_size=15, starting_player=self._you_color, renju=True)
 
         view = CliView(
             you_name=name,
-            you_color=self.you_color,
+            you_color=self._you_color,
             opp_name="(connecting...)",
-            opp_color=Player.BLACK,
+            opp_color=self._you_color.opponent(),
         )
         cmd = CommandProcessor(board_size=15)
         super().__init__(game=game, view=view, command_processor=cmd, tick_sec=tick_sec)
@@ -96,21 +96,20 @@ class GuestController(BaseController):
 
         self.board_size = match.get_int("size", 15)
         self.renju = match.get_bool01("renju", True)
-        self.you_color = Player(match.get_int("you", Player.WHITE.value))
+        self._you_color = Player(match.get_int("you", Player.WHITE.value))
 
         # Recreate game with correct size & renju.
         # starting_player will be set by ENDSTATE/TURN later, but initialize safe default.
-        self.game = Game(board_size=self.board_size, starting_player=Player.BLACK, renju=self.renju)
+        self.game = Game(board_size=self.board_size, starting_player=self._you_color, renju=self.renju)
 
         # Update command processor and view to reflect actual board size/colors
         self.cmd = CommandProcessor(board_size=self.board_size)
 
-        opp_color = self.you_color.opponent()
         self.view = CliView(
             you_name=self.name,
-            you_color=self.you_color,
+            you_color=self._you_color,
             opp_name=self.host_name,
-            opp_color=opp_color,
+            opp_color=self._you_color.opponent(),
         )
 
         # Ask for state snapshot right away (host may also send it automatically)
@@ -135,6 +134,10 @@ class GuestController(BaseController):
         self.view.set_message(Message(MessageType.QUIT, "Exiting..."))
         self._dirty = True
 
+    @property
+    def you_color(self) -> Player:
+        return self._you_color
+    
     # ============================================================
     # External events
     # ============================================================
@@ -201,6 +204,10 @@ class GuestController(BaseController):
             self._handle_response(msg)
             return
 
+        if msg.type == MsgType.MATCH:
+            self._handle_match_update(msg)
+            return
+
         # Ignore others (WELCOME/HELLO/etc.)
 
     # ============================================================
@@ -227,6 +234,10 @@ class GuestController(BaseController):
             return
 
         if command.type == CommandType.UNDO:
+            if not self.can_request_undo():
+                self.view.set_error("You can undo only if the last stone is yours.")
+                self._dirty = True
+                return
             self._request_to_host(RequestKind.UNDO)
             return
 
@@ -307,7 +318,7 @@ class GuestController(BaseController):
         if size != self.game.board.size:
             # Recreate game if size differs
             self.board_size = size
-            self.game = Game(board_size=size, starting_player=Player.BLACK, renju=self.renju)
+            self.game = Game(board_size=size, starting_player=self._you_color, renju=self.renju)
             self.cmd = CommandProcessor(board_size=size)
         else:
             self.game.board.clear()
@@ -333,7 +344,7 @@ class GuestController(BaseController):
             pass
 
     def _end_snapshot(self, msg: NetMessage) -> None:
-        turn = Player(msg.get_int("turn", Player.BLACK.value))
+        turn = Player(msg.get_int("turn", self._you_color.value))
         winner_val = msg.get_int("winner", Player.EMPTY.value)
         winner = None if winner_val == Player.EMPTY.value else Player(winner_val)
 
@@ -343,6 +354,24 @@ class GuestController(BaseController):
 
         self.view.set_message(Message(MessageType.SWAP, "[SYNC] State updated."))
         self._dirty = True
+
+    def _handle_match_update(self, msg: NetMessage) -> None:
+        self.board_size = msg.get_int("size", self.board_size)
+        self.renju = msg.get_bool01("renju", self.renju)
+
+        new_you = Player(msg.get_int("you", self._you_color.value))
+        if new_you != self._you_color:
+            self._you_color = new_you
+
+            # View도 새 색으로 갱신 (opp는 반대색)
+            self.view = CliView(
+                you_name=self.name,
+                you_color=self._you_color,
+                opp_name=self.host_name,
+                opp_color=self._you_color.opponent(),
+            )
+
+            self.view.set_swap("SWAP applied. Colors changed.")
 
     # ============================================================
     # Consent flow (REQ/RESP)
@@ -482,5 +511,8 @@ class GuestController(BaseController):
             if msg.type == mtype:
                 return msg
             if msg.type == MsgType.QUIT:
+                return None
+            if msg.type == MsgType.MATCH:
+                self._handle_match_update(msg)
                 return None
         return None

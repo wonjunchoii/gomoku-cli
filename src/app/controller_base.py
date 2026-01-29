@@ -12,7 +12,7 @@ from typing import Optional, List
 from src.cli.commands import Command, CommandProcessor, CommandType, ParseResult
 from src.cli.view import CliView, Message, MessageType
 from src.core.board import Position
-from src.core.game import Game
+from src.core.game import Game, Player
 
 
 # =========================
@@ -230,7 +230,18 @@ class BaseController(ABC):
     # =========================
     # Hooks / Abstract methods
     # =========================
+    @property
+    @abstractmethod
+    def you_color(self) -> Player:
+        """Return the local player's stone color."""
+        raise NotImplementedError
 
+    def can_request_undo(self) -> bool:
+        """PvP default: undo is allowed only if the last move is yours."""
+        if not self.game.move_history:
+            return False
+        return self.game.move_history[-1].player == self.you_color
+    
     def stop(self) -> None:
         self._running = False
 

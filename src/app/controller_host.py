@@ -47,19 +47,20 @@ class HostController(BaseController):
         self.port = port
         self.renju = renju
         self.you_name = you_name
-
+        self._you_color: Player = Player.BLACK
+        
         self.transport: Optional[Transport] = None
         self.guest_name: str = "Guest"
 
-        # authoritative game: host starts BLACK by default (can SWAP before first move)
-        game = Game(board_size=board_size, starting_player=Player.BLACK, renju=renju)
+        # authoritative game: host starts with you_color by default (can SWAP before first move)
+        game = Game(board_size=board_size, starting_player=self._you_color, renju=renju)
 
         # placeholder view (updated after handshake)
         view = CliView(
             you_name=you_name,
-            you_color=Player.BLACK,
+            you_color=self._you_color,
             opp_name="(connecting...)",
-            opp_color=Player.WHITE,
+            opp_color=self._you_color.opponent(),
         )
 
         cmd = CommandProcessor(board_size=board_size)
@@ -98,9 +99,9 @@ class HostController(BaseController):
         # Replace view with correct opponent info
         self.view = CliView(
             you_name=self.you_name,
-            you_color=Player.BLACK,
+            you_color=self._you_color,
             opp_name=self.guest_name,
-            opp_color=Player.WHITE,
+            opp_color=self._you_color.opponent(),
         )
 
         # Send WELCOME + MATCH + TURN + initial snapshot
@@ -138,6 +139,9 @@ class HostController(BaseController):
         self.view.set_message(Message(MessageType.QUIT, "Exiting..."))
         self._dirty = True
 
+    @property
+    def you_color(self) -> Player:
+        return self._you_color
     # ============================================================
     # External events
     # ============================================================
@@ -216,9 +220,13 @@ class HostController(BaseController):
             return
 
         if command.type == CommandType.UNDO:
+            if not self.can_request_undo():
+                self.view.set_error("You can undo only if the last stone is yours.")
+                self._dirty = True
+                return
             self._request_to_guest(RequestKind.UNDO)
             return
-
+        
         self.view.set_error("Unknown/unsupported command. Use /help")
         self._dirty = True
 
@@ -228,7 +236,7 @@ class HostController(BaseController):
 
     def handle_move(self, pos: Position) -> None:
         # Must be host's turn (host is BLACK)
-        if self.game.current_player != Player.BLACK:
+        if self.game.current_player != self._you_color:
             self.view.set_error("Not your turn.")
             self._dirty = True
             return
@@ -240,7 +248,7 @@ class HostController(BaseController):
             return
 
         # Broadcast authoritative apply
-        self._broadcast_apply(pos, Player.BLACK)
+        self._broadcast_apply(pos, self._you_color)
 
         # UI message
         self.view.set_message(Message(MessageType.SWAP, f"[YOU MOVE] {pos.x}, {pos.y} ({pos})"))
@@ -262,7 +270,7 @@ class HostController(BaseController):
         pos = Position(x, y)
 
         # Must be guest's turn (WHITE)
-        if self.game.current_player != Player.WHITE:
+        if self.game.current_player != self.you_color.opponent():
             self.transport.send(NetMessage(MsgType.ERR, {"msg": "Not your turn"}))
             return
 
@@ -273,7 +281,7 @@ class HostController(BaseController):
             self._dirty = True
             return
 
-        self._broadcast_apply(pos, Player.WHITE)
+        self._broadcast_apply(pos, self.you_color.opponent())
         self.view.set_message(Message(MessageType.SWAP, f"[OPP MOVE] {pos.x}, {pos.y} ({pos})"))
         self._broadcast_turn_or_win()
         self._dirty = True
@@ -435,14 +443,36 @@ class HostController(BaseController):
         Execute the agreed action locally (authoritative), and sync guest via snapshot.
         """
         if kind == RequestKind.SWAP:
-            swapped = self.game.swap_player()
-            # In our model, host is "BLACK UI", but starting/current may flip.
-            # For simplicity, we keep stones as O/X by Player value, and just update TURN.
-            # If you want host/guest colors to swap too, we can support that later.
-            if not swapped:
-                # Shouldn't happen due to checks
-                self.view.set_error("Swap failed.")
-            self._send_state_snapshot()
+            # swap is only allowed before start (already checked)
+            # 1) swap colors (YOU <-> OPP)
+            self._you_color = self._you_color.opponent()
+
+            # 2) reset game to initial empty state
+            self.game.reset()
+            # Always black starts
+            self.game.current_player = Player.BLACK
+
+            # 3) update host view with new colors
+            self.view = CliView(
+                you_name=self.you_name,
+                you_color=self._you_color,
+                opp_name=self.guest_name,
+                opp_color=self._you_color.opponent(),
+            )
+            
+            if self.transport is not None:
+                self.transport.send(NetMessage(
+                    MsgType.MATCH,
+                    {
+                        "size": str(self.game.board.size),
+                        "renju": "1" if self.renju else "0",
+                        "you": str(self._you_color.opponent().value),  # guest color
+                    }
+                ))
+                self.transport.send(NetMessage(MsgType.TURN, {"color": str(self.game.current_player.value)}))
+                self._send_state_snapshot()
+
+            self.view.set_swap("SWAP applied. Colors changed (Black always starts).")
             self._dirty = True
             return
 
@@ -456,7 +486,7 @@ class HostController(BaseController):
             ok = self.game.undo_last_move()
             if not ok:
                 # still sync to keep consistent
-                self.view.set_undo("No moves to undo.")
+                self.view.set_error("No moves to undo.")
             self._send_state_snapshot()
             self._dirty = True
             return

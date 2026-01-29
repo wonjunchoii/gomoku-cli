@@ -43,22 +43,22 @@ class PvCController(BaseController):
         self.cfg = config
 
         # Default: human is BLACK (O), AI is WHITE (X)
-        self.you_color: Player = Player.BLACK
-        self.ai_color: Player = Player.WHITE
+        self._you_color: Player = Player.BLACK
+        self._ai_color: Player = Player.WHITE
         self.you_name: str = "You"
         self.ai_name: str = f"CPU(lvl{self.cfg.lvl})"
 
         game = Game(
             board_size=self.cfg.board_size,
-            starting_player=Player.BLACK,   # black starts
+            starting_player=self._you_color,   # black starts
             renju=self.cfg.renju,
         )
 
         view = CliView(
             you_name=self.you_name,
-            you_color=self.you_color,
+            you_color=self._you_color,
             opp_name=self.ai_name,
-            opp_color=self.ai_color,
+            opp_color=self._ai_color,
         )
 
         cmd = CommandProcessor(board_size=self.cfg.board_size)
@@ -96,7 +96,7 @@ class PvCController(BaseController):
             self._ai_thinking = False
             return
 
-        if self.game.current_player != self.ai_color:
+        if self.game.current_player != self._ai_color:
             self._ai_thinking = False
             return
 
@@ -126,7 +126,7 @@ class PvCController(BaseController):
             self._ai_thinking = False
             return
 
-        if self.game.current_player != self.ai_color:
+        if self.game.current_player != self._ai_color:
             self._ai_thinking = False
             return
 
@@ -159,7 +159,7 @@ class PvCController(BaseController):
             return
 
         if command.type == CommandType.UNDO:
-            self._undo_two_plies()
+            self._undo_to_last_human()
             return
 
         if command.type == CommandType.RESTART:
@@ -208,8 +208,12 @@ class PvCController(BaseController):
           BLACK.symbol() -> 'O'
           WHITE.symbol() -> 'X'
         """
-        return GomokuAI(color=self.ai_color.symbol(), lvl=self.cfg.lvl)
+        return GomokuAI(color=self._ai_color.symbol(), lvl=self.cfg.lvl)
 
+    @property
+    def you_color(self) -> Player:
+        return self._you_color
+    
     def _board_as_symbols(self) -> List[List[str]]:
         """
         Convert Board -> List[List[str]] for AI:
@@ -254,36 +258,10 @@ class PvCController(BaseController):
 
         return pos
 
-    def _undo_two_plies(self) -> None:
-        """
-        Undo rule vs AI:
-          - Undo human last and AI last (up to two moves).
-          - If only one move exists, undo one.
-        """
-        if not self.game.move_history:
-            self.view.set_undo("No moves to undo.")
-            self._dirty = True
-            return
-
-        undone = 0
-
-        # Undo last move
-        if self.game.undo_last_move():
-            undone += 1
-
-        # If after undo it's still AI-vs-human, also undo one more
-        if self.game.move_history:
-            if self.game.undo_last_move():
-                undone += 1
-
-        self._ai_thinking = False
-        self.view.set_undo(f"Undid {undone} move(s).")
-        self._dirty = True
-
     def _restart(self) -> None:
         self.game.reset()
         # Black always starts (renju/gomoku standard). If you are WHITE, AI(BLACK) starts.
-        self.game.current_player = Player.BLACK
+        self.game.current_player = self._you_color
         self.game.winner = None
         self._ai_thinking = False
         self.view.set_restart("Game restarted.")
@@ -302,21 +280,57 @@ class PvCController(BaseController):
             return
 
         # Swap colors
-        self.you_color, self.ai_color = self.ai_color, self.you_color
+        self._you_color, self._ai_color = self._ai_color, self._you_color
         self.ai = self._new_ai()
 
         # Reset game and set turn to BLACK (standard)
         self.game.reset()
-        self.game.current_player = Player.BLACK
+        self.game.current_player = self._you_color
 
         # Update view so state line shows correct stones/names
         self.view = CliView(
             you_name=self.you_name,
-            you_color=self.you_color,
+            you_color=self._you_color,
             opp_name=self.ai_name,
-            opp_color=self.ai_color,
+            opp_color=self._ai_color,
         )
 
         self._ai_thinking = False
         self.view.set_swap("Swapped colors. Black moves first.")
+        self._dirty = True
+        
+    def _undo_to_last_human(self) -> None:
+        """
+        PVC undo rule:
+        - Undo moves until the most recent HUMAN stone is removed.
+        - If last move is AI -> undo AI then undo human (2 plies).
+        - If last move is human -> undo just that move (1 ply).
+        """
+        if not self.game.move_history:
+            self.view.set_error("No moves to undo.")
+            self._dirty = True
+            return
+
+        # Find the last human move index
+        last_human_idx = None
+        for i in range(len(self.game.move_history) - 1, -1, -1):
+            if self.game.move_history[i].player == self.you_color:
+                last_human_idx = i
+                break
+
+        if last_human_idx is None:
+            self.view.set_error("No human move to undo.")
+            self._dirty = True
+            return
+
+        undone = 0
+        # Undo from the end down to last_human_idx
+        while len(self.game.move_history) - 1 >= last_human_idx:
+            if self.game.undo_last_move():
+                undone += 1
+            else:
+                break
+
+        self._ai_thinking = False
+        self.view.set_undo(f"Undid {undone} move(s).")
         self._dirty = True
