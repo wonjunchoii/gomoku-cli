@@ -170,7 +170,7 @@ class BaseController(ABC):
             if line is None:
                 continue
 
-            parsed = self.cmd.parse(line)
+            parsed = self.cmd.parse(line, expecting_yn=self.expecting_yn())
             if not parsed.ok:
                 # empty input is ok-noop
                 if parsed.error:
@@ -241,6 +241,10 @@ class BaseController(ABC):
         if not self.game.move_history:
             return False
         return self.game.move_history[-1].player == self.you_color
+
+    def expecting_yn(self) -> bool:
+        """True when waiting for y/n (e.g. swap/restart/undo). Override in PvP controllers."""
+        return False
     
     def stop(self) -> None:
         self._running = False

@@ -137,7 +137,10 @@ class GuestController(BaseController):
     @property
     def you_color(self) -> Player:
         return self._you_color
-    
+
+    def expecting_yn(self) -> bool:
+        return self._pending is not None
+
     # ============================================================
     # External events
     # ============================================================

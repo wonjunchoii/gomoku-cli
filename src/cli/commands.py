@@ -72,10 +72,11 @@ class CommandProcessor:
 
     # ---------- Public parse API ----------
 
-    def parse(self, text: str) -> ParseResult:
+    def parse(self, text: str, *, expecting_yn: bool = False) -> ParseResult:
         """
         Parse a raw input line.
         Returns ParseResult with either command or position on success.
+        When expecting_yn is True (y/n prompt), invalid input shows "Enter Y or N".
         """
         raw = (text or "").strip()
         if not raw:
@@ -103,6 +104,10 @@ class CommandProcessor:
                 return ParseResult(command=Command(CommandType.HELP, raw))
 
             return ParseResult(error=f"Unknown command: {raw}")
+
+        # When in y/n prompt, only y/n are valid; anything else is invalid
+        if expecting_yn:
+            return ParseResult(error="Invalid input. Enter Y or N")
 
         # move: "x y"
         parts = raw.split()
