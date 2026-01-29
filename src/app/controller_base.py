@@ -146,7 +146,7 @@ class BaseController(ABC):
         """
         Main loop:
           1) pump external events
-          2) render if dirty or periodic
+          2) render if dirty
           3) poll user input (tick_sec)
           4) handle parsed input
         """
@@ -161,8 +161,9 @@ class BaseController(ABC):
             # 2) handle queued events
             self._pump_events()
 
-            # 3) render periodically (keeps opponent moves visible within ~tick_sec)
-            self._render()
+            # 3) render only when dirty (when there's input or state change)
+            if self._dirty:
+                self._render()
 
             # 4) poll input (non-blocking)
             line = self._input.poll_line(timeout_sec=self.tick_sec)
@@ -187,8 +188,9 @@ class BaseController(ABC):
     # ---------- Rendering ----------
 
     def _render(self) -> None:
-        # Always render each tick for simplicity; you can optimize to only render when dirty.
-        # Keeping it always ensures "1s update" guarantee.
+        # Only render when dirty (when there's input or state change)
+        if not self._dirty:
+            return
         self.view.render(self.game)
         self._dirty = False
 
@@ -223,6 +225,7 @@ class BaseController(ABC):
 
     def _handle_move(self, pos: Position) -> None:
         self.handle_move(pos)
+        # Mark dirty after handling move (handle_move should set _dirty if it modifies state)
 
     # =========================
     # Hooks / Abstract methods

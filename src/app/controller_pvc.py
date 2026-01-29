@@ -59,7 +59,6 @@ class PvCController(BaseController):
             you_color=self.you_color,
             opp_name=self.ai_name,
             opp_color=self.ai_color,
-            prompt=">>> ",
         )
 
         cmd = CommandProcessor(board_size=self.cfg.board_size)
@@ -111,6 +110,7 @@ class PvCController(BaseController):
             # No move: treat as game over (draw not modeled in core yet)
             self.view.set_message(Message(MessageType.ERR, "AI has no valid moves."))
             self._ai_thinking = False
+            self._dirty = True
             return
 
         self.push_event(ControllerEvent(EventType.AI, pos))
@@ -135,10 +135,12 @@ class PvCController(BaseController):
             # If AI picked invalid (shouldn’t), request another next tick
             self.view.set_message(Message(MessageType.ERR, f"AI invalid: {result.error_message}"))
             self._ai_thinking = False
+            self._dirty = True
             return
 
         self.view.set_message(Message(MessageType.SWAP, f"[OPP MOVE] {pos.x}, {pos.y} ({pos})"))
         self._ai_thinking = False
+        self._dirty = True
 
     # ============================================================
     # User commands
@@ -148,10 +150,12 @@ class PvCController(BaseController):
         # y/n has no meaning in PVC
         if command.type in (CommandType.ACCEPT, CommandType.DECLINE):
             self.view.set_error("No confirmation needed vs AI.")
+            self._dirty = True
             return
 
         if command.type == CommandType.HELP:
             self.view.set_message(Message(MessageType.ERR, self.cmd.help_text()))
+            self._dirty = True
             return
 
         if command.type == CommandType.UNDO:
@@ -167,6 +171,7 @@ class PvCController(BaseController):
             return
 
         self.view.set_error("Unknown/unsupported command. Use /help")
+        self._dirty = True
 
     # ============================================================
     # User move
@@ -175,18 +180,22 @@ class PvCController(BaseController):
     def handle_move(self, pos: Position) -> None:
         if self.game.winner is not None:
             self.view.set_error("Game is over.")
+            self._dirty = True
             return
 
         if self.game.current_player != self.you_color:
             self.view.set_error("Not your turn.")
+            self._dirty = True
             return
 
         result = self.game.make_move(pos)
         if not result.success:
             self.view.set_error(result.error_message)
+            self._dirty = True
             return
 
         self.view.set_message(Message(MessageType.SWAP, f"[YOU MOVE] {pos.x}, {pos.y} ({pos})"))
+        self._dirty = True
 
     # ============================================================
     # Helpers
@@ -253,6 +262,7 @@ class PvCController(BaseController):
         """
         if not self.game.move_history:
             self.view.set_undo("No moves to undo.")
+            self._dirty = True
             return
 
         undone = 0
@@ -268,6 +278,7 @@ class PvCController(BaseController):
 
         self._ai_thinking = False
         self.view.set_undo(f"Undid {undone} move(s).")
+        self._dirty = True
 
     def _restart(self) -> None:
         self.game.reset()
@@ -276,6 +287,7 @@ class PvCController(BaseController):
         self.game.winner = None
         self._ai_thinking = False
         self.view.set_restart("Game restarted.")
+        self._dirty = True
 
     def _swap_colors_before_start(self) -> None:
         """
@@ -286,6 +298,7 @@ class PvCController(BaseController):
         """
         if not self.game.board.is_empty_board() or self.game.move_history:
             self.view.set_error("Swap is only allowed before the game starts.")
+            self._dirty = True
             return
 
         # Swap colors
@@ -302,8 +315,8 @@ class PvCController(BaseController):
             you_color=self.you_color,
             opp_name=self.ai_name,
             opp_color=self.ai_color,
-            prompt=">>> ",
         )
 
         self._ai_thinking = False
         self.view.set_swap("Swapped colors. Black moves first.")
+        self._dirty = True

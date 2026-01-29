@@ -1,4 +1,4 @@
-from typing import List, Tuple, Iterator, Optional, Set
+from typing import List, Tuple, Iterator, Optional, Set, overload
 import numpy as np
 from dataclasses import dataclass
 from enum import Enum
@@ -107,8 +107,23 @@ class Board:
     
     # ---------- Bounds / indexing ----------
 
-    def in_bounds(self, pos: Position) -> bool:
-        return 1 <= pos.x <= self._size and 1 <= pos.y <= self._size
+    @overload
+    def in_bounds(self, pos: Position) -> bool: ...
+    
+    @overload
+    def in_bounds(self, x: int, y: int) -> bool: ...
+
+    def in_bounds(self, arg1: Position | int, arg2: int | None = None) -> bool:
+        if isinstance(arg1, Position):
+            # in_bounds(pos)
+            x, y = arg1.x, arg1.y
+        else:
+            # in_bounds(x, y)
+            if arg2 is None:
+                raise TypeError("in_bounds(x, y) requires both x and y")
+            x, y = arg1, arg2
+
+        return 1 <= x <= self._size and 1 <= y <= self._size
 
     def _idx(self, pos: Position) -> Tuple[int, int]:
         """Convert 1-based Position to 0-based (row, col)."""
@@ -157,6 +172,17 @@ class Board:
         self._grid[r][c] = Player.EMPTY
         self._moves -= 1
 
+    def swap_colors(self) -> None:
+        """
+        Swap BLACK <-> WHITE stones on the board.
+        (EMPTY stays EMPTY)
+        """
+        for r in range(self._size):
+            for c in range(self._size):
+                if self._grid[r][c] == Player.BLACK:
+                    self._grid[r][c] = Player.WHITE
+                elif self._grid[r][c] == Player.WHITE:
+                    self._grid[r][c] = Player.BLACK
 
     def clear(self) -> None:
         """Reset board to empty."""

@@ -65,7 +65,6 @@ class GuestController(BaseController):
             you_color=self.you_color,
             opp_name="(connecting...)",
             opp_color=Player.BLACK,
-            prompt=">>> ",
         )
         cmd = CommandProcessor(board_size=15)
         super().__init__(game=game, view=view, command_processor=cmd, tick_sec=tick_sec)
@@ -112,7 +111,6 @@ class GuestController(BaseController):
             you_color=self.you_color,
             opp_name=self.host_name,
             opp_color=opp_color,
-            prompt=">>> ",
         )
 
         # Ask for state snapshot right away (host may also send it automatically)
@@ -159,11 +157,13 @@ class GuestController(BaseController):
 
         if msg.type == MsgType.QUIT:
             self.view.set_quit("Host left.")
+            self._dirty = True
             self.stop()
             return
 
         if msg.type == MsgType.ERR:
             self.view.set_error(msg.get("msg", "Remote error"))
+            self._dirty = True
             return
 
         # Authoritative incremental updates
@@ -215,6 +215,7 @@ class GuestController(BaseController):
 
         if self._pending is not None:
             self.view.set_error(f"Pending {self._pending.kind.value}. Respond first (y/n).")
+            self._dirty = True
             return
 
         if command.type == CommandType.SWAP:
@@ -230,6 +231,7 @@ class GuestController(BaseController):
             return
 
         self.view.set_error("Unknown/unsupported command. Use /help")
+        self._dirty = True
 
     # ============================================================
     # User move
@@ -238,19 +240,23 @@ class GuestController(BaseController):
     def handle_move(self, pos: Position) -> None:
         if self.transport is None:
             self.view.set_error("No connection.")
+            self._dirty = True
             return
 
         # Guest only requests move; host validates and broadcasts APPLY/TURN/WIN
         if self.game.winner is not None:
             self.view.set_error("Game is over.")
+            self._dirty = True
             return
 
         if self.game.current_player != self.you_color:
             self.view.set_error("Not your turn.")
+            self._dirty = True
             return
 
         self.transport.send(NetMessage(MsgType.MOVE, {"x": str(pos.x), "y": str(pos.y)}))
         self.view.set_message(Message(MessageType.SWAP, f"[YOU MOVE] {pos.x}, {pos.y} ({pos}) [sent]"))
+        self._dirty = True
 
     # ============================================================
     # Authoritative message handlers
@@ -270,6 +276,7 @@ class GuestController(BaseController):
             if self.transport:
                 self.transport.send(NetMessage(MsgType.STATE, {}))
             self.view.set_error("Desync detected. Requested STATE.")
+            self._dirty = True
             return
 
         self.game.move_history.append(Move(position=pos, player=color))
@@ -279,14 +286,17 @@ class GuestController(BaseController):
             self.view.set_message(Message(MessageType.SWAP, f"[YOU MOVE] {pos.x}, {pos.y} ({pos})"))
         else:
             self.view.set_message(Message(MessageType.SWAP, f"[OPP MOVE] {pos.x}, {pos.y} ({pos})"))
+        self._dirty = True
 
     def _handle_turn(self, msg: NetMessage) -> None:
         self.game.current_player = Player(msg.get_int("color", Player.BLACK.value))
+        self._dirty = True
 
     def _handle_win(self, msg: NetMessage) -> None:
         self.game.winner = Player(msg.get_int("color", Player.BLACK.value))
         # Winner line is shown by view state indicator; message can be generic
         self.view.set_message(Message(MessageType.SWAP, "GAME OVER"))
+        self._dirty = True
 
     # ============================================================
     # Snapshot handlers
@@ -332,6 +342,7 @@ class GuestController(BaseController):
         self._snapshot_mode = False
 
         self.view.set_message(Message(MessageType.SWAP, "[SYNC] State updated."))
+        self._dirty = True
 
     # ============================================================
     # Consent flow (REQ/RESP)
@@ -340,6 +351,7 @@ class GuestController(BaseController):
     def _request_to_host(self, kind: RequestKind) -> None:
         if self.transport is None:
             self.view.set_error("No connection.")
+            self._dirty = True
             return
 
         # SWAP only before start (still ask; host can decline)
@@ -355,6 +367,7 @@ class GuestController(BaseController):
             # Busy; auto decline
             self.transport.send(NetMessage(MsgType.RESP, {"kind": msg.get("kind", ""), "ok": "0", "from": self.name, "msg": "busy"}))
             self.view.set_error("Got request while another is pending. Auto-declined.")
+            self._dirty = True
             return
 
         kind_s = msg.get("kind", "")
@@ -363,6 +376,7 @@ class GuestController(BaseController):
         except Exception:
             self.transport.send(NetMessage(MsgType.RESP, {"kind": kind_s, "ok": "0", "from": self.name, "msg": "unknown kind"}))
             self.view.set_error(f"Unknown request kind: {kind_s}")
+            self._dirty = True
             return
 
         self._pending = PendingRequest(kind=kind, direction="IN")
@@ -391,10 +405,12 @@ class GuestController(BaseController):
     def _handle_yes_no(self, accept: bool) -> None:
         if self._pending is None or self._pending.direction != "IN":
             self.view.set_error("Nothing to accept/decline.")
+            self._dirty = True
             return
         if self.transport is None:
             self.view.set_error("No connection.")
             self._pending = None
+            self._dirty = True
             return
 
         kind = self._pending.kind
@@ -419,6 +435,7 @@ class GuestController(BaseController):
                 self.view.set_swap("Requested SWAP. Waiting for opponent (y/n).")
             else:
                 self.view.set_swap("Opponent requests SWAP. Accept? (y/n)")
+            self._dirty = True
             return
 
         if kind == RequestKind.RESTART:
@@ -426,6 +443,7 @@ class GuestController(BaseController):
                 self.view.set_restart("Requested RESTART. Waiting for opponent (y/n).")
             else:
                 self.view.set_restart("Opponent requests RESTART. Accept? (y/n)")
+            self._dirty = True
             return
 
         if kind == RequestKind.UNDO:
@@ -433,6 +451,7 @@ class GuestController(BaseController):
                 self.view.set_undo("Requested UNDO. Waiting for opponent (y/n).")
             else:
                 self.view.set_undo("Opponent requests UNDO. Accept? (y/n)")
+            self._dirty = True
             return
 
     def _set_result_message(self, kind: RequestKind, *, accepted: bool, by_host: bool) -> None:
@@ -445,6 +464,7 @@ class GuestController(BaseController):
             self.view.set_restart(f"{who} {verdict} RESTART.")
         else:
             self.view.set_undo(f"{who} {verdict} UNDO.")
+        self._dirty = True
 
     # ============================================================
     # Handshake helper

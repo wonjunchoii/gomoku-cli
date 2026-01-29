@@ -60,7 +60,6 @@ class HostController(BaseController):
             you_color=Player.BLACK,
             opp_name="(connecting...)",
             opp_color=Player.WHITE,
-            prompt=">>> ",
         )
 
         cmd = CommandProcessor(board_size=board_size)
@@ -102,7 +101,6 @@ class HostController(BaseController):
             you_color=Player.BLACK,
             opp_name=self.guest_name,
             opp_color=Player.WHITE,
-            prompt=">>> ",
         )
 
         # Send WELCOME + MATCH + TURN + initial snapshot
@@ -166,6 +164,7 @@ class HostController(BaseController):
 
         if msg.type == MsgType.QUIT:
             self.view.set_quit("Opponent left.")
+            self._dirty = True
             self.stop()
             return
 
@@ -187,6 +186,7 @@ class HostController(BaseController):
 
         if msg.type == MsgType.ERR:
             self.view.set_error(msg.get("msg", "Remote error"))
+            self._dirty = True
             return
 
         # ignore others by default
@@ -204,6 +204,7 @@ class HostController(BaseController):
         # Reject actions if already pending something
         if self._pending is not None:
             self.view.set_error(f"Pending {self._pending.kind.value}. Respond first (y/n).")
+            self._dirty = True
             return
 
         if command.type == CommandType.SWAP:
@@ -219,6 +220,7 @@ class HostController(BaseController):
             return
 
         self.view.set_error("Unknown/unsupported command. Use /help")
+        self._dirty = True
 
     # ============================================================
     # User move
@@ -228,11 +230,13 @@ class HostController(BaseController):
         # Must be host's turn (host is BLACK)
         if self.game.current_player != Player.BLACK:
             self.view.set_error("Not your turn.")
+            self._dirty = True
             return
 
         result = self.game.make_move(pos)
         if not result.success:
             self.view.set_error(result.error_message)
+            self._dirty = True
             return
 
         # Broadcast authoritative apply
@@ -243,6 +247,7 @@ class HostController(BaseController):
 
         # Winner / turn
         self._broadcast_turn_or_win()
+        self._dirty = True
 
     # ============================================================
     # Network handlers
@@ -265,11 +270,13 @@ class HostController(BaseController):
         if not result.success:
             self.transport.send(NetMessage(MsgType.ERR, {"msg": result.error_message}))
             self.view.set_error(f"Guest invalid: {result.error_message}")
+            self._dirty = True
             return
 
         self._broadcast_apply(pos, Player.WHITE)
         self.view.set_message(Message(MessageType.SWAP, f"[OPP MOVE] {pos.x}, {pos.y} ({pos})"))
         self._broadcast_turn_or_win()
+        self._dirty = True
 
     def _broadcast_apply(self, pos: Position, color: Player) -> None:
         if self.transport is None:
@@ -331,6 +338,7 @@ class HostController(BaseController):
     def _request_to_guest(self, kind: RequestKind) -> None:
         if self.transport is None:
             self.view.set_error("No connection.")
+            self._dirty = True
             return
 
         # Some requests only allowed before game starts, etc.
@@ -338,6 +346,7 @@ class HostController(BaseController):
             # swap allowed only if game not started
             if not self.game.board.is_empty_board():
                 self.view.set_error("Swap is only allowed before the game starts.")
+                self._dirty = True
                 return
 
         self._pending = PendingRequest(kind=kind, direction="OUT")
@@ -352,6 +361,7 @@ class HostController(BaseController):
             # Already pending; refuse
             self.transport.send(NetMessage(MsgType.RESP, {"kind": msg.get("kind", ""), "ok": "0", "from": self.you_name, "msg": "busy"}))
             self.view.set_error("Got request while another is pending. Auto-declined.")
+            self._dirty = True
             return
 
         kind_s = msg.get("kind", "")
@@ -360,12 +370,14 @@ class HostController(BaseController):
         except Exception:
             self.transport.send(NetMessage(MsgType.RESP, {"kind": kind_s, "ok": "0", "from": self.you_name, "msg": "unknown kind"}))
             self.view.set_error(f"Unknown request kind: {kind_s}")
+            self._dirty = True
             return
 
         # Validate basic constraints early
         if kind == RequestKind.SWAP and not self.game.board.is_empty_board():
             self.transport.send(NetMessage(MsgType.RESP, {"kind": kind.value, "ok": "0", "from": self.you_name, "msg": "swap only before start"}))
             self.view.set_swap("Guest requested SWAP (auto-declined: game already started).")
+            self._dirty = True
             return
 
         self._pending = PendingRequest(kind=kind, direction="IN")
@@ -397,10 +409,12 @@ class HostController(BaseController):
         """
         if self._pending is None or self._pending.direction != "IN":
             self.view.set_error("Nothing to accept/decline.")
+            self._dirty = True
             return
         if self.transport is None:
             self.view.set_error("No connection.")
             self._pending = None
+            self._dirty = True
             return
 
         kind = self._pending.kind
@@ -429,11 +443,13 @@ class HostController(BaseController):
                 # Shouldn't happen due to checks
                 self.view.set_error("Swap failed.")
             self._send_state_snapshot()
+            self._dirty = True
             return
 
         if kind == RequestKind.RESTART:
             self.game.reset()
             self._send_state_snapshot()
+            self._dirty = True
             return
 
         if kind == RequestKind.UNDO:
@@ -442,6 +458,7 @@ class HostController(BaseController):
                 # still sync to keep consistent
                 self.view.set_undo("No moves to undo.")
             self._send_state_snapshot()
+            self._dirty = True
             return
 
     # ============================================================
@@ -454,6 +471,7 @@ class HostController(BaseController):
                 self.view.set_swap("Requested SWAP. Waiting for opponent (y/n).")
             else:
                 self.view.set_swap("Opponent requests SWAP. Accept? (y/n)")
+            self._dirty = True
             return
 
         if kind == RequestKind.RESTART:
@@ -461,6 +479,7 @@ class HostController(BaseController):
                 self.view.set_restart("Requested RESTART. Waiting for opponent (y/n).")
             else:
                 self.view.set_restart("Opponent requests RESTART. Accept? (y/n)")
+            self._dirty = True
             return
 
         if kind == RequestKind.UNDO:
@@ -468,6 +487,7 @@ class HostController(BaseController):
                 self.view.set_undo("Requested UNDO. Waiting for opponent (y/n).")
             else:
                 self.view.set_undo("Opponent requests UNDO. Accept? (y/n)")
+            self._dirty = True
             return
 
     def _set_result_message(self, kind: RequestKind, *, accepted: bool, by_guest: bool) -> None:
@@ -480,6 +500,7 @@ class HostController(BaseController):
             self.view.set_restart(f"{who} {verdict} RESTART.")
         else:
             self.view.set_undo(f"{who} {verdict} UNDO.")
+        self._dirty = True
 
     # ============================================================
     # Handshake helper

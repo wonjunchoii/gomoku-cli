@@ -69,9 +69,10 @@ class MoveValidator:
         # forward
         cur = center
         while True:
-            nxt = Position(cur.x + dx, cur.y + dy)
-            if not board.in_bounds(nxt):
+            nx, ny = cur.x + dx, cur.y + dy
+            if not board.in_bounds(nx, ny):
                 break
+            nxt = Position(nx, ny)
             if self._cell_virtual(board, nxt, center, player) != player:
                 break
             total += 1
@@ -80,9 +81,10 @@ class MoveValidator:
         # backward
         cur = center
         while True:
-            nxt = Position(cur.x - dx, cur.y - dy)
-            if not board.in_bounds(nxt):
+            nx, ny = cur.x - dx, cur.y - dy
+            if not board.in_bounds(nx, ny):
                 break
+            nxt = Position(nx, ny)
             if self._cell_virtual(board, nxt, center, player) != player:
                 break
             total += 1
@@ -124,10 +126,12 @@ class MoveValidator:
         """
         chars: List[str] = []
         for k in range(-span, span + 1):
-            pos = Position(center.x + k * dx, center.y + k * dy)
-            if not board.in_bounds(pos):
+            nx, ny = center.x + k * dx, center.y + k * dy
+            # Check bounds before creating Position (Position requires x,y >= 1)
+            if not (1 <= nx <= board.size and 1 <= ny <= board.size):
                 chars.append("X")
                 continue
+            pos = Position(nx, ny)
             cell = self._cell_virtual(board, pos, center, player)
             if cell == Player.EMPTY:
                 chars.append(".")
