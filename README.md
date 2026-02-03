@@ -72,4 +72,4 @@ python gomoku.py join --host <HOST_IP> --port 33333 --name Guest
 
 ## Contributing
 
-버그 리포트나 기능 제안은 [Issues](https://github.com/wonjuncio/gomoku-cli/issues)에 등록해 주세요. Pull Request도 환영합니다.
+버그 리포트나 기능 제안은 [Issues](https://github.com/wonjunchoii/gomoku-cli/issues)에 등록해 주세요. Pull Request도 환영합니다.
